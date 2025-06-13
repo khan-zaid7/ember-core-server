@@ -1,10 +1,18 @@
 import admin from '../config/firebaseAdmin.js';
 import {createUserDoc} from '../models/userModel.js';
+import jwt from 'jsonwebtoken';
+import axios from 'axios';
 
 const allowedRoles = ['admin', 'fieldworker', 'volunteer', 'coordinator'];
+const JWT_SECRET = process.env.JWT_SECRET || 'my_jwt_secret';
+const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY; 
 
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const isValidPhone = (phone) => /^[0-9\-\+]{9,15}$/.test(phone);
+
+
+
+// -------------Register User--------------
 
 export const registerUser = async (req, res) => {
     const { email, password, name, role, phone_number } = req.body;
@@ -79,4 +87,38 @@ export const registerUser = async (req, res) => {
 
         return res.status(400).json({ error: error.message });
     }
+};
+
+
+// -------------Login User--------------
+
+export const loginUser = async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    // Step 1: Verify credentials via Firebase REST API
+    const firebaseRes = await axios.post(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
+      { email, password, returnSecureToken: true }
+    );
+
+    const { localId: uid } = firebaseRes.data;
+
+    // Step 2: Fetch user info from Firebase Admin SDK
+    const user = await admin.auth().getUser(uid);
+    const role = user.customClaims?.role || 'user';
+
+    // Step 3: Generate JWT for session
+    const token = jwt.sign({ uid, email, role }, JWT_SECRET, { expiresIn: '2h' });
+
+    return res.status(200).json({
+      message: 'Login successful',
+      token,
+      expiresIn: '2h',
+    });
+
+  } catch (error) {
+    console.error('[Login Error]', error?.response?.data || error.message);
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
 };

@@ -4,6 +4,8 @@ import cors from 'cors';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import authRoutes from './routes/authRoutes.js';
+// app.js
+import protectedRoutes from './routes/protectedRoutes.js'; 
 
 dotenv.config();
 
@@ -17,6 +19,7 @@ app.use(morgan('dev'));
 
 // Routes
 app.use('/api', authRoutes);
+app.use('/api', protectedRoutes);
 
 // Root routeAdd commentMore actions
 app.get('/', (req, res) => {
