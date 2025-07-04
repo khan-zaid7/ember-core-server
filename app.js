@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import authRoutes from './routes/authRoutes.js';
 // app.js
 import protectedRoutes from './routes/protectedRoutes.js'; 
+import syncRoutes from './routes/syncRoutes.js';
 
 dotenv.config();
 
@@ -20,6 +21,7 @@ app.use(morgan('dev'));
 // Routes
 app.use('/api', authRoutes);
 app.use('/api', protectedRoutes);
+app.use('/api/sync', syncRoutes);
 
 // Root routeAdd commentMore actions
 app.get('/', (req, res) => {
@@ -27,6 +29,6 @@ app.get('/', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server is running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server is running on http://0.0.0.0:${PORT}`);
 });
