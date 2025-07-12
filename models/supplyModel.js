@@ -13,6 +13,8 @@ export const createSupplyDoc = async (id, data) => {
     timestamp: data.timestamp,
     synced: true,
     status: data.status || 'active',
+    barcode: data.barcode || null,
+    sku: data.sku || null,
   });
 };
 
@@ -25,5 +27,7 @@ export const updateSupplyDoc = async (id, data) => {
     timestamp: data.timestamp || admin.firestore.FieldValue.serverTimestamp(),
     status: data.status || 'active',
     synced: true,
+    barcode: data.barcode || null,
+    sku: data.sku || null,
   });
 };

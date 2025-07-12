@@ -12,6 +12,36 @@ export const syncSupplyFromClient = async (req, res) => {
   }
 
   try {
+    // Check for barcode uniqueness if provided
+    if (s.barcode) {
+      const barcodeQuery = col.where('barcode', '==', s.barcode);
+      const existingBarcode = await barcodeQuery.get();
+      
+      if (!existingBarcode.empty && existingBarcode.docs[0].id !== s.supply_id) {
+        return res.status(409).json({
+          error: 'Conflict: Supply with this barcode already exists',
+          conflict_field: 'barcode',
+          conflict_type: 'unique_constraint',
+          latest_data: existingBarcode.docs[0].data(),
+        });
+      }
+    }
+    
+    // Check for SKU uniqueness if provided
+    if (s.sku) {
+      const skuQuery = col.where('sku', '==', s.sku);
+      const existingSku = await skuQuery.get();
+      
+      if (!existingSku.empty && existingSku.docs[0].id !== s.supply_id) {
+        return res.status(409).json({
+          error: 'Conflict: Supply with this SKU already exists',
+          conflict_field: 'sku',
+          conflict_type: 'unique_constraint',
+          latest_data: existingSku.docs[0].data(),
+        });
+      }
+    }
+    
     const docRef = col.doc(s.supply_id);
     const doc = await docRef.get();
 
@@ -65,6 +95,29 @@ export const resolveSupplyConflict = (clientData, serverData, strategy = 'merge'
         (serverData.updated_at.toDate ? serverData.updated_at.toDate() : new Date(serverData.updated_at)) : 
         null;
         
+      // Add special strategies
+      if (strategy === 'sum_quantities') {
+        // Sum the quantities from both client and server
+        const clientQuantity = clientData.quantity || 0;
+        const serverQuantity = serverData.quantity || 0;
+        return {
+          ...serverData,
+          ...clientData,
+          quantity: clientQuantity + serverQuantity,
+          updated_at: new Date().toISOString()
+        };
+      } else if (strategy === 'average_quantities') {
+        // Average the quantities (useful for stock counts)
+        const clientQuantity = clientData.quantity || 0;
+        const serverQuantity = serverData.quantity || 0;
+        return {
+          ...serverData,
+          ...clientData,
+          quantity: Math.round((clientQuantity + serverQuantity) / 2),
+          updated_at: new Date().toISOString()
+        };
+      }
+      
       // If client data is newer, respect client's intentional field changes
       if (clientUpdatedAt && serverUpdatedAt && clientUpdatedAt > serverUpdatedAt) {
         return {
