@@ -12,6 +12,24 @@ export const syncTaskFromClient = async (req, res) => {
   }
 
   try {
+    // Check for task title uniqueness within the same location if location is provided
+    if (t.title && t.location_id) {
+      const titleQuery = col
+        .where('title', '==', t.title)
+        .where('location_id', '==', t.location_id);
+      
+      const existingTitle = await titleQuery.get();
+      
+      if (!existingTitle.empty && existingTitle.docs[0].id !== t.task_id) {
+        return res.status(409).json({
+          error: 'Conflict: Task with this title already exists at the same location',
+          conflict_field: 'title',
+          conflict_type: 'unique_constraint',
+          latest_data: existingTitle.docs[0].data(),
+        });
+      }
+    }
+    
     const docRef = col.doc(t.task_id);
     const doc = await docRef.get();
 

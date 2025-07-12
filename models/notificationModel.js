@@ -20,7 +20,8 @@ export const createNotificationDoc = async (id, data) => {
     received_at: data.received_at || admin.firestore.FieldValue.serverTimestamp(),
     read: data.read || 0,
     archived: data.archived || 0,
-    updated_at: admin.firestore.FieldValue.serverTimestamp()
+    created_at: data.created_at || admin.firestore.FieldValue.serverTimestamp(),
+    updated_at: data.updated_at || admin.firestore.FieldValue.serverTimestamp()
   });
 };
 

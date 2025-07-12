@@ -29,6 +29,32 @@ export const syncUserFromClient = async (req, res) => {
         });
       }
 
+      // Check if email was changed and already exists for another user
+      if (user.email !== serverData.email) {
+        const existingEmail = await usersCollection.where('email', '==', user.email).get();
+        if (!existingEmail.empty && existingEmail.docs[0].id !== user.user_id) {
+          return res.status(409).json({
+            error: 'Conflict: Email already exists',
+            conflict_field: 'email',
+            conflict_type: 'unique_constraint',
+            latest_data: existingEmail.docs[0].data(),
+          });
+        }
+      }
+      
+      // Check if phone_number was changed and already exists for another user
+      if (user.phone_number && user.phone_number !== serverData.phone_number) {
+        const existingPhone = await usersCollection.where('phone_number', '==', user.phone_number).get();
+        if (!existingPhone.empty && existingPhone.docs[0].id !== user.user_id) {
+          return res.status(409).json({
+            error: 'Conflict: Phone number already exists',
+            conflict_field: 'phone_number',
+            conflict_type: 'unique_constraint',
+            latest_data: existingPhone.docs[0].data(),
+          });
+        }
+      }
+
       // ✅ Safe to update
       await updateUserDoc(user.user_id, user);
     } else {
@@ -40,8 +66,23 @@ export const syncUserFromClient = async (req, res) => {
         return res.status(409).json({
           error: 'Conflict: Email already exists',
           conflict_field: 'email',
+          conflict_type: 'unique_constraint',
           latest_data: existingUser,
         });
+      }
+      
+      // 🔍 Check if another user already exists with this phone number
+      if (user.phone_number) {
+        const existingPhone = await usersCollection.where('phone_number', '==', user.phone_number).get();
+        if (!existingPhone.empty) {
+          const existingUser = existingPhone.docs[0].data();
+          return res.status(409).json({
+            error: 'Conflict: Phone number already exists',
+            conflict_field: 'phone_number',
+            conflict_type: 'unique_constraint',
+            latest_data: existingUser,
+          });
+        }
       }
 
       // ✅ Safe to create new user

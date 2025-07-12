@@ -7,11 +7,27 @@ const col = db.collection('task_assignments');
 export const syncTaskAssignmentFromClient = async (req, res) => {
   const a = req.body;
 
-  if (!a.assignment_id || !a.task_id || !a.user_id || !a.updated_at) {
+  if (!a.assignment_id || !a.task_id || !a.user_id) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
   try {
+    // Check if the user is already assigned to this task (in a different assignment)
+    const duplicateQuery = col
+      .where('task_id', '==', a.task_id)
+      .where('user_id', '==', a.user_id);
+    
+    const duplicateAssignments = await duplicateQuery.get();
+    
+    if (!duplicateAssignments.empty && duplicateAssignments.docs[0].id !== a.assignment_id) {
+      return res.status(409).json({
+        error: 'Conflict: User is already assigned to this task',
+        conflict_field: 'task_id_user_id',
+        conflict_type: 'unique_constraint',
+        latest_data: duplicateAssignments.docs[0].data(),
+      });
+    }
+    
     const docRef = col.doc(a.assignment_id);
     const doc = await docRef.get();
 

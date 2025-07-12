@@ -12,6 +12,26 @@ export const syncRegistrationFromClient = async (req, res) => {
   }
 
   try {
+    // Only check for person_name + age + gender combination uniqueness
+    // as these are the fields that are actually in the model
+    if (r.person_name && r.age && r.gender) {
+      const nameQuery = collection
+        .where('person_name', '==', r.person_name)
+        .where('age', '==', r.age)
+        .where('gender', '==', r.gender);
+      
+      const existingPerson = await nameQuery.get();
+      
+      if (!existingPerson.empty && existingPerson.docs[0].id !== r.registration_id) {
+        return res.status(409).json({
+          error: 'Conflict: Patient with the same name, age, and gender already exists',
+          conflict_field: 'person_identity',
+          conflict_type: 'unique_constraint',
+          latest_data: existingPerson.docs[0].data(),
+        });
+      }
+    }
+    
     const docRef = collection.doc(r.registration_id);
     const doc = await docRef.get();
 

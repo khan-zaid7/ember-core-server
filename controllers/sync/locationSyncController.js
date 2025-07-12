@@ -12,6 +12,21 @@ export const syncLocationFromClient = async (req, res) => {
   }
 
   try {
+    // Check for location name uniqueness if provided
+    if (l.name) {
+      const nameQuery = col.where('name', '==', l.name);
+      const existingName = await nameQuery.get();
+      
+      if (!existingName.empty && existingName.docs[0].id !== l.location_id) {
+        return res.status(409).json({
+          error: 'Conflict: Location with this name already exists',
+          conflict_field: 'name',
+          conflict_type: 'unique_constraint',
+          latest_data: existingName.docs[0].data(),
+        });
+      }
+    }
+    
     const docRef = col.doc(l.location_id);
     const doc = await docRef.get();
 
