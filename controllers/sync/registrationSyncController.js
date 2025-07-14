@@ -4,6 +4,136 @@ import admin from '../../config/firebaseAdmin.js';
 const db = admin.firestore();
 const collection = db.collection('registrations');
 
+// === Input Validators ===
+function isValidAge(age) {
+  return typeof age === 'number' && age >= 0 && age <= 150;
+}
+
+function isValidGender(gender) {
+  const validGenders = ['male', 'female', 'other', 'prefer_not_to_say'];
+  return typeof gender === 'string' && validGenders.includes(gender.toLowerCase());
+}
+
+function isValidPersonName(name) {
+  return typeof name === 'string' && name.trim().length >= 2 && name.trim().length <= 100;
+}
+
+/**
+ * Checks if a registration with the same person identity already exists
+ * @param {string} personName - The person's name
+ * @param {number} age - The person's age
+ * @param {string} gender - The person's gender
+ * @param {string} [currentRegistrationId=null] - The current registration ID (to exclude from check)
+ * @returns {Promise<Object|null>}
+ */
+async function checkPersonIdentityExists(personName, age, gender, currentRegistrationId = null) {
+  if (!personName || age === undefined || !gender) return null;
+  
+  const snapshot = await collection
+    .where('person_name', '==', personName)
+    .where('age', '==', age)
+    .where('gender', '==', gender)
+    .get();
+    
+  if (snapshot.empty) return null;
+  
+  if (snapshot.size > 1) {
+    console.warn(
+      `⚠️ Multiple registrations found for person "${personName}", age ${age}, gender ${gender}. Data may be corrupted!`
+    );
+  }
+  
+  const firstOtherDoc = snapshot.docs.find(
+    (doc) => !currentRegistrationId || doc.id !== currentRegistrationId
+  );
+  
+  if (!firstOtherDoc) return null;
+  
+  return {
+    exists: true,
+    data: firstOtherDoc.data(),
+    id: firstOtherDoc.id,
+  };
+}
+
+/**
+ * Checks if two registrations are likely for the same person based on matching data
+ * @param {Object} clientData - The client registration data
+ * @param {Object} serverData - The server registration data
+ * @returns {boolean} - True if registrations likely belong to same person
+ */
+function isSamePersonRegistration(clientData, serverData) {
+  // Define fields to compare for identity matching
+  const criticalFields = ['person_name', 'age', 'gender'];
+  const optionalFields = ['contact', 'location_id']; // Less critical but can help confirm
+  
+  let matchCount = 0;
+  let totalFields = 0;
+  let matchDetails = {};
+  
+  // Check critical fields
+  for (const field of criticalFields) {
+    if (clientData[field] !== undefined && serverData[field] !== undefined) {
+      totalFields++;
+      
+      if (field === 'person_name') {
+        // Name comparison (case-insensitive, handle minor variations)
+        const clientName = clientData[field].toLowerCase().trim();
+        const serverName = serverData[field].toLowerCase().trim();
+        
+        // Check exact match or significant overlap
+        const match = clientName === serverName || 
+                     clientName.includes(serverName) || 
+                     serverName.includes(clientName);
+        matchDetails[field] = match;
+        if (match) matchCount++;
+      } else if (field === 'age') {
+        // Age should match exactly or be within 1 year (account for birthday)
+        const match = Math.abs(clientData[field] - serverData[field]) <= 1;
+        matchDetails[field] = match;
+        if (match) matchCount++;
+      } else if (field === 'gender') {
+        // Gender should match exactly
+        const match = clientData[field].toLowerCase() === serverData[field].toLowerCase();
+        matchDetails[field] = match;
+        if (match) matchCount++;
+      }
+    }
+  }
+  
+  // Check optional fields for additional confirmation
+  for (const field of optionalFields) {
+    if (clientData[field] && serverData[field]) {
+      totalFields++;
+      const match = clientData[field] === serverData[field];
+      matchDetails[field] = match;
+      if (match) matchCount++;
+    }
+  }
+  
+  // Consider it the same person if:
+  // 1. Name and gender match AND (age matches OR contact matches)
+  // 2. OR if 80% or more of available fields match
+  const nameMatches = clientData.person_name && serverData.person_name && 
+                     clientData.person_name.toLowerCase().trim() === serverData.person_name.toLowerCase().trim();
+  const genderMatches = clientData.gender && serverData.gender &&
+                       clientData.gender.toLowerCase() === serverData.gender.toLowerCase();
+  const matchPercentage = totalFields > 0 ? (matchCount / totalFields) : 0;
+  
+  const isSamePerson = (nameMatches && genderMatches && matchCount >= 2) || matchPercentage >= 0.8;
+  
+  // Log the decision for debugging
+  console.log(`🔍 Identity comparison for ${clientData.person_name}:`);
+  console.log(`   - Match details:`, matchDetails);
+  console.log(`   - Score: ${matchCount}/${totalFields} (${Math.round(matchPercentage * 100)}%)`);
+  console.log(`   - Name matches: ${nameMatches}`);
+  console.log(`   - Gender matches: ${genderMatches}`);
+  console.log(`   - Decision: ${isSamePerson ? 'SAME PERSON' : 'DIFFERENT PERSON'}`);
+  
+  return isSamePerson;
+}
+
+// === Main Sync Logic, with allowed_strategies in all 409 responses ===
 export const syncRegistrationFromClient = async (req, res) => {
   const r = req.body;
 
@@ -11,27 +141,18 @@ export const syncRegistrationFromClient = async (req, res) => {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
+  // Validate input data
+  if (!isValidPersonName(r.person_name)) {
+    return res.status(400).json({ error: 'Invalid person name format' });
+  }
+  if (r.age !== undefined && !isValidAge(r.age)) {
+    return res.status(400).json({ error: 'Invalid age value' });
+  }
+  if (r.gender && !isValidGender(r.gender)) {
+    return res.status(400).json({ error: 'Invalid gender value' });
+  }
+
   try {
-    // Only check for person_name + age + gender combination uniqueness
-    // as these are the fields that are actually in the model
-    if (r.person_name && r.age && r.gender) {
-      const nameQuery = collection
-        .where('person_name', '==', r.person_name)
-        .where('age', '==', r.age)
-        .where('gender', '==', r.gender);
-      
-      const existingPerson = await nameQuery.get();
-      
-      if (!existingPerson.empty && existingPerson.docs[0].id !== r.registration_id) {
-        return res.status(409).json({
-          error: 'Conflict: Patient with the same name, age, and gender already exists',
-          conflict_field: 'person_identity',
-          conflict_type: 'unique_constraint',
-          latest_data: existingPerson.docs[0].data(),
-        });
-      }
-    }
-    
     const docRef = collection.doc(r.registration_id);
     const doc = await docRef.get();
 
@@ -43,13 +164,88 @@ export const syncRegistrationFromClient = async (req, res) => {
       if (clientUpdated < serverUpdated) {
         return res.status(409).json({
           error: 'Conflict: Stale update',
-          conflict_field: 'registration_id',
+          conflict_field: 'updated_at',
           latest_data: serverData,
+          allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
         });
       }
 
+      // Check for person identity changes that might conflict
+      if (r.person_name !== serverData.person_name || 
+          r.age !== serverData.age || 
+          r.gender !== serverData.gender) {
+        const identityCheck = await checkPersonIdentityExists(
+          r.person_name, 
+          r.age, 
+          r.gender, 
+          r.registration_id
+        );
+        
+        if (identityCheck) {
+          // Check if this is likely the same person (edge case: data correction)
+          if (isSamePersonRegistration(r, identityCheck.data)) {
+            console.log(`🔄 Auto-resolving: Same person detected for identity change ${r.person_name}`);
+            
+            // This might be a duplicate registration merge situation
+            return res.status(409).json({
+              error: 'Conflict: Person identity belongs to another registration that appears to be the same person',
+              conflict_field: 'person_identity',
+              conflict_type: 'potential_duplicate_registration',
+              latest_data: identityCheck.data,
+              allowed_strategies: ['client_wins', 'server_wins', 'merge'],
+            });
+          } else {
+            // Different person with same identity
+            return res.status(409).json({
+              error: 'Conflict: Patient with the same name, age, and gender already exists',
+              conflict_field: 'person_identity',
+              conflict_type: 'unique_constraint',
+              latest_data: identityCheck.data,
+              allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+            });
+          }
+        }
+      }
+
+      // ✅ Safe to update
       await updateRegistrationDoc(r.registration_id, r);
     } else {
+      // Create case - check for existing person
+      const identityCheck = await checkPersonIdentityExists(r.person_name, r.age, r.gender);
+      if (identityCheck) {
+        // Check if this is likely the same person on a different device/session
+        if (isSamePersonRegistration(r, identityCheck.data)) {
+          console.log(`🔄 Auto-resolving: Same person detected for registration ${r.person_name}`);
+          
+          // Auto-resolve by updating the existing registration with new data
+          // Use the server's registration_id but update with client data
+          const mergedData = {
+            ...identityCheck.data,
+            ...r,
+            registration_id: identityCheck.id, // Keep server's registration_id
+            updated_at: new Date().toISOString(),
+          };
+          
+          await updateRegistrationDoc(identityCheck.id, mergedData);
+          
+          return res.status(200).json({ 
+            message: 'Registration synced successfully (auto-resolved duplicate registration)',
+            resolved_as: 'same_person_detected',
+            server_registration_id: identityCheck.id,
+          });
+        } else {
+          // Different person with same identity - show conflict
+          return res.status(409).json({
+            error: 'Conflict: Patient with the same name, age, and gender already exists',
+            conflict_field: 'person_identity',
+            conflict_type: 'unique_constraint',
+            latest_data: identityCheck.data,
+            allowed_strategies: ['client_wins'],
+          });
+        }
+      }
+
+      // ✅ Safe to create new registration
       await createRegistrationDoc(r.registration_id, r);
     }
 
@@ -60,14 +256,12 @@ export const syncRegistrationFromClient = async (req, res) => {
   }
 };
 
-/**
- * Resolves conflicts between client and server registration data
- * @param {Object} clientData - The registration data from the client
- * @param {Object} serverData - The registration data from the server
- * @param {string} strategy - The conflict resolution strategy ('client_wins', 'server_wins', 'merge')
- * @returns {Object} - Merged registration data
- */
-export const resolveRegistrationConflict = (clientData, serverData, strategy = 'merge') => {
+// === Improved Merge: Dynamic Field Coverage ===
+export const resolveRegistrationConflict = (
+  clientData,
+  serverData,
+  strategy = 'merge'
+) => {
   switch (strategy) {
     case 'client_wins':
       // Client data takes precedence
@@ -76,44 +270,75 @@ export const resolveRegistrationConflict = (clientData, serverData, strategy = '
     case 'server_wins':
       // Server data takes precedence
       return { ...serverData };
+
+    case 'update_data':
+      return {
+        ...clientData,
+        person_name: serverData.person_name,
+        age: serverData.age,
+        gender: serverData.gender,
+        updated_at: new Date().toISOString(),
+      };
       
     case 'merge':
-    default:
+    default: {
       // Intelligently merge data based on timestamps
       const clientUpdatedAt = clientData.updated_at ? new Date(clientData.updated_at) : null;
       const serverUpdatedAt = serverData.updated_at ? 
         (serverData.updated_at.toDate ? serverData.updated_at.toDate() : new Date(serverData.updated_at)) : 
         null;
-        
-      // If client data is newer, respect client's intentional field changes
-      if (clientUpdatedAt && serverUpdatedAt && clientUpdatedAt > serverUpdatedAt) {
-        return {
-          ...serverData,
-          // Always use client values for these fields even if null/empty
-          person_name: clientData.person_name !== undefined ? clientData.person_name : serverData.person_name,
-          age: clientData.age !== undefined ? clientData.age : serverData.age,
-          gender: clientData.gender !== undefined ? clientData.gender : serverData.gender,
-          contact: clientData.contact !== undefined ? clientData.contact : serverData.contact,
-          medical_history: clientData.medical_history !== undefined ? clientData.medical_history : serverData.medical_history,
-          location_id: clientData.location_id !== undefined ? clientData.location_id : serverData.location_id,
-          status: clientData.status !== undefined ? clientData.status : serverData.status,
-          notes: clientData.notes !== undefined ? clientData.notes : serverData.notes,
-          // Use client's updated_at since it's newer
-          updated_at: clientData.updated_at
-        };
-      } else {
-        // Server data is newer or timestamps are equal - prioritize server but consider client changes
-        return {
-          ...serverData,
-          // For content fields that are often updated, consider client changes
-          medical_history: mergeTextFields(clientData.medical_history, serverData.medical_history),
-          notes: mergeTextFields(clientData.notes, serverData.notes),
-          // Status field may have specific progression logic
-          status: calculateMostAdvancedRegistrationStatus(clientData.status, serverData.status),
-          // Keep server's updated_at as it's newer
-          updated_at: serverData.updated_at
-        };
+
+      const merged = { ...serverData };
+      const allKeys = [
+        ...new Set([
+          ...Object.keys(serverData),
+          ...Object.keys(clientData),
+        ]),
+      ];
+      const criticalFields = ['person_name', 'age', 'gender', 'status'];
+
+      allKeys.forEach((key) => {
+        if (criticalFields.includes(key)) {
+          if (
+            clientUpdatedAt &&
+            serverUpdatedAt &&
+            clientUpdatedAt > serverUpdatedAt &&
+            clientData[key] !== undefined &&
+            clientData[key] !== serverData[key]
+          ) {
+            merged[key] = clientData[key];
+          }
+        } else if (
+          clientData[key] !== undefined &&
+          (clientUpdatedAt &&
+            serverUpdatedAt &&
+            clientUpdatedAt > serverUpdatedAt
+            ? clientData[key] !== serverData[key]
+            : false)
+        ) {
+          merged[key] = clientData[key];
+        }
+      });
+
+      // Special handling for text fields that might need merging
+      if (clientData.medical_history !== undefined || serverData.medical_history !== undefined) {
+        merged.medical_history = mergeTextFields(clientData.medical_history, serverData.medical_history);
       }
+      if (clientData.notes !== undefined || serverData.notes !== undefined) {
+        merged.notes = mergeTextFields(clientData.notes, serverData.notes);
+      }
+
+      // Status field may have specific progression logic
+      if (clientData.status !== undefined || serverData.status !== undefined) {
+        merged.status = calculateMostAdvancedRegistrationStatus(clientData.status, serverData.status);
+      }
+
+      merged.updated_at =
+        clientUpdatedAt && serverUpdatedAt && clientUpdatedAt > serverUpdatedAt
+          ? clientData.updated_at
+          : serverData.updated_at;
+      return merged;
+    }
   }
 };
 
@@ -164,75 +389,117 @@ const calculateMostAdvancedRegistrationStatus = (clientStatus, serverStatus) => 
   return statusRank[clientStatus] > statusRank[serverStatus] ? clientStatus : serverStatus;
 };
 
-/**
- * Handles explicit conflict resolution requests from client
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- */
+// === Conflict Resolution Handler with allowed_strategies in response ===
 export const resolveRegistrationSyncConflict = async (req, res) => {
   try {
-    const { registration_id, resolution_strategy } = req.body;
+    const { registration_id, resolution_strategy, clientData } = req.body;
     
     if (!registration_id) {
       return res.status(400).json({ 
         success: false, 
         message: 'Registration ID is required',
-        status: 'error'
+        status: 'error',
+        allowed_strategies: [],
       });
     }
     
-    if (!['client_wins', 'server_wins', 'merge'].includes(resolution_strategy)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid resolution strategy. Must be one of: client_wins, server_wins, merge',
-        status: 'error'
-      });
-    }
-    
-    // Get current server data
+    const allowed_strategies = [];
     const docRef = collection.doc(registration_id);
     const doc = await docRef.get();
     
+    let resolvedData;
+    let isNewRegistration = false;
+    
     if (!doc.exists) {
-      return res.status(404).json({
-        success: false,
-        message: 'Registration not found',
-        status: 'error'
-      });
+      isNewRegistration = true;
+      allowed_strategies.push('client_wins');
+      
+      if (resolution_strategy === 'server_wins' || resolution_strategy === 'update_data') {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot use ${resolution_strategy} strategy for new registration - no server data exists`,
+          status: 'error',
+          allowed_strategies,
+        });
+      }
+      
+      // Validate unique constraints for new registration
+      if (clientData.person_name && clientData.age !== undefined && clientData.gender) {
+        const identityCheck = await checkPersonIdentityExists(
+          clientData.person_name, 
+          clientData.age, 
+          clientData.gender, 
+          registration_id
+        );
+        if (identityCheck) {
+          return res.status(409).json({
+            success: false,
+            message: 'Cannot resolve conflict: Patient with the same identity already exists',
+            status: 'error',
+            conflict_field: 'person_identity',
+            conflict_type: 'unique_constraint',
+            latest_data: identityCheck.data,
+            allowed_strategies,
+          });
+        }
+      }
+      
+      resolvedData = { ...clientData };
+    } else {
+      allowed_strategies.push('client_wins', 'server_wins', 'merge', 'update_data');
+      const serverData = doc.data();
+      
+      // For update_data, check constraints
+      if (resolution_strategy === 'update_data') {
+        if (clientData.person_name !== serverData.person_name || 
+            clientData.age !== serverData.age || 
+            clientData.gender !== serverData.gender) {
+          const identityCheck = await checkPersonIdentityExists(
+            clientData.person_name, 
+            clientData.age, 
+            clientData.gender, 
+            registration_id
+          );
+          if (identityCheck) {
+            return res.status(409).json({
+              success: false,
+              message: 'Cannot resolve conflict: Patient with the same identity already exists',
+              status: 'error',
+              conflict_field: 'person_identity',
+              conflict_type: 'unique_constraint',
+              latest_data: identityCheck.data,
+              allowed_strategies,
+            });
+          }
+        }
+      }
+      
+      resolvedData = resolveRegistrationConflict(clientData, serverData, resolution_strategy);
     }
     
-    const serverData = doc.data();
-    
-    // Get client data from request
-    const clientData = req.body.clientData;
-    
-    if (!clientData) {
-      return res.status(400).json({
-        success: false,
-        message: 'Client data is required',
-        status: 'error'
-      });
+    if (isNewRegistration) {
+      await createRegistrationDoc(registration_id, resolvedData);
+    } else {
+      await updateRegistrationDoc(registration_id, resolvedData);
     }
-    
-    // Apply requested resolution strategy
-    const resolvedData = resolveRegistrationConflict(clientData, serverData, resolution_strategy);
-    
-    // Update with resolved data
-    await updateRegistrationDoc(registration_id, resolvedData);
     
     return res.status(200).json({
       success: true,
-      message: `Conflict resolved using ${resolution_strategy} strategy`,
+      message: `Conflict resolved using ${resolution_strategy} strategy${isNewRegistration ? ' (new registration created)' : ' (existing registration updated)'}`,
       status: 'resolved',
       registration_id,
-      resolvedData
+      resolvedData,
+      isNewRegistration,
+      resolution_strategy,
+      allowed_strategies,
     });
   } catch (error) {
     console.error('Error resolving registration conflict:', error);
     return res.status(500).json({
       success: false,
       message: `Server error: ${error.message}`,
-      status: 'error'
+      status: 'error',
+      allowed_strategies: [],
     });
   }
 };

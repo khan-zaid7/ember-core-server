@@ -4,6 +4,85 @@ import admin from '../../config/firebaseAdmin.js';
 const db = admin.firestore();
 const col = db.collection('supplies');
 
+/**
+ * Checks if two supply profiles are likely the same supply based on matching data
+ * @param {Object} clientData - The client supply data
+ * @param {Object} serverData - The server supply data
+ * @returns {boolean} - True if supplies likely belong to same supply
+ */
+function isSameSupplyProfile(clientData, serverData) {
+  if (!clientData || !serverData) return false;
+  
+  // Define fields to compare for supply identity matching
+  const criticalFields = ['item_name', 'barcode', 'sku'];
+  const optionalFields = ['category', 'unit', 'location_id'];
+  
+  let matchCount = 0;
+  let totalFields = 0;
+  let matchDetails = {};
+  
+  // Check critical fields
+  for (const field of criticalFields) {
+    if (clientData[field] && serverData[field]) {
+      totalFields++;
+      
+      if (field === 'item_name') {
+        // Item name comparison (case-insensitive, trimmed)
+        const clientName = clientData[field].toLowerCase().trim();
+        const serverName = serverData[field].toLowerCase().trim();
+        
+        const match = clientName === serverName || 
+                     clientName.includes(serverName) || 
+                     serverName.includes(clientName);
+        matchDetails[field] = match;
+        if (match) matchCount++;
+      } else if (field === 'barcode' || field === 'sku') {
+        // Exact match for barcode/SKU (these should be unique)
+        const match = clientData[field] === serverData[field];
+        matchDetails[field] = match;
+        if (match) matchCount++;
+      }
+    }
+  }
+  
+  // Check optional fields for additional confirmation
+  for (const field of optionalFields) {
+    if (clientData[field] && serverData[field]) {
+      totalFields++;
+      const match = clientData[field] === serverData[field];
+      matchDetails[field] = match;
+      if (match) matchCount++;
+    }
+  }
+  
+  // Consider it the same supply if:
+  // 1. Barcode or SKU matches (these are unique identifiers)
+  // 2. Item name matches AND at least one other field matches
+  // 3. OR if 80% or more of available fields match
+  const barcodeMatches = clientData.barcode && serverData.barcode && 
+                        clientData.barcode === serverData.barcode;
+  const skuMatches = clientData.sku && serverData.sku && 
+                    clientData.sku === serverData.sku;
+  const itemNameMatches = clientData.item_name && serverData.item_name && 
+                         clientData.item_name.toLowerCase().trim() === serverData.item_name.toLowerCase().trim();
+  const matchPercentage = totalFields > 0 ? (matchCount / totalFields) : 0;
+  
+  const isSameSupply = barcodeMatches || skuMatches || 
+                      (itemNameMatches && matchCount >= 2) || 
+                      matchPercentage >= 0.8;
+  
+  // Log the decision for debugging
+  console.log(`🔍 Supply identity comparison for "${clientData.item_name}":`);
+  console.log(`   - Match details:`, matchDetails);
+  console.log(`   - Score: ${matchCount}/${totalFields} (${Math.round(matchPercentage * 100)}%)`);
+  console.log(`   - Barcode matches: ${barcodeMatches}`);
+  console.log(`   - SKU matches: ${skuMatches}`);
+  console.log(`   - Item name matches: ${itemNameMatches}`);
+  console.log(`   - Decision: ${isSameSupply ? 'SAME SUPPLY' : 'DIFFERENT SUPPLY'}`);
+  
+  return isSameSupply;
+}
+
 export const syncSupplyFromClient = async (req, res) => {
   const s = req.body;
 
@@ -18,12 +97,35 @@ export const syncSupplyFromClient = async (req, res) => {
       const existingBarcode = await barcodeQuery.get();
       
       if (!existingBarcode.empty && existingBarcode.docs[0].id !== s.supply_id) {
-        return res.status(409).json({
-          error: 'Conflict: Supply with this barcode already exists',
-          conflict_field: 'barcode',
-          conflict_type: 'unique_constraint',
-          latest_data: existingBarcode.docs[0].data(),
-        });
+        // Check if this is likely the same supply (smart conflict detection)
+        if (isSameSupplyProfile(s, existingBarcode.docs[0].data())) {
+          console.log(`🔄 Auto-resolving: Same supply detected for barcode ${s.barcode}`);
+          
+          // Auto-resolve by updating the existing supply with new data
+          const mergedData = {
+            ...existingBarcode.docs[0].data(),
+            ...s,
+            supply_id: existingBarcode.docs[0].id, // Keep server's supply_id
+            updated_at: new Date().toISOString(),
+          };
+          
+          await updateSupplyDoc(existingBarcode.docs[0].id, mergedData);
+          
+          return res.status(200).json({ 
+            message: 'Supply synced successfully (auto-resolved duplicate supply)',
+            resolved_as: 'same_supply_detected',
+            server_supply_id: existingBarcode.docs[0].id,
+          });
+        } else {
+          // Different supply with same barcode - show conflict
+          return res.status(409).json({
+            error: 'Conflict: Supply with this barcode already exists',
+            conflict_field: 'barcode',
+            conflict_type: 'unique_constraint',
+            latest_data: existingBarcode.docs[0].data(),
+            allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          });
+        }
       }
     }
     
@@ -33,12 +135,35 @@ export const syncSupplyFromClient = async (req, res) => {
       const existingSku = await skuQuery.get();
       
       if (!existingSku.empty && existingSku.docs[0].id !== s.supply_id) {
-        return res.status(409).json({
-          error: 'Conflict: Supply with this SKU already exists',
-          conflict_field: 'sku',
-          conflict_type: 'unique_constraint',
-          latest_data: existingSku.docs[0].data(),
-        });
+        // Check if this is likely the same supply (smart conflict detection)
+        if (isSameSupplyProfile(s, existingSku.docs[0].data())) {
+          console.log(`🔄 Auto-resolving: Same supply detected for SKU ${s.sku}`);
+          
+          // Auto-resolve by updating the existing supply with new data
+          const mergedData = {
+            ...existingSku.docs[0].data(),
+            ...s,
+            supply_id: existingSku.docs[0].id, // Keep server's supply_id
+            updated_at: new Date().toISOString(),
+          };
+          
+          await updateSupplyDoc(existingSku.docs[0].id, mergedData);
+          
+          return res.status(200).json({ 
+            message: 'Supply synced successfully (auto-resolved duplicate supply)',
+            resolved_as: 'same_supply_detected',
+            server_supply_id: existingSku.docs[0].id,
+          });
+        } else {
+          // Different supply with same SKU - show conflict
+          return res.status(409).json({
+            error: 'Conflict: Supply with this SKU already exists',
+            conflict_field: 'sku',
+            conflict_type: 'unique_constraint',
+            latest_data: existingSku.docs[0].data(),
+            allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          });
+        }
       }
     }
     
@@ -53,8 +178,9 @@ export const syncSupplyFromClient = async (req, res) => {
       if (clientUpdated < serverUpdated) {
         return res.status(409).json({
           error: 'Conflict: Stale update',
-          conflict_field: 'supply_id',
+          conflict_field: 'updated_at',
           latest_data: serverData,
+          allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
         });
       }
 
@@ -153,74 +279,92 @@ export const resolveSupplyConflict = (clientData, serverData, strategy = 'merge'
 };
 
 /**
- * Handles explicit conflict resolution requests from client
+ * Handles explicit conflict resolution requests from client, with allowed_strategies and resolution_strategy echoed.
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
  */
 export const resolveSupplySyncConflict = async (req, res) => {
   try {
-    const { supply_id, resolution_strategy } = req.body;
+    const { supply_id, resolution_strategy, clientData } = req.body;
     
     if (!supply_id) {
       return res.status(400).json({ 
         success: false, 
         message: 'Supply ID is required',
-        status: 'error'
+        status: 'error',
+        allowed_strategies: [],
       });
     }
-    
-    if (!['client_wins', 'server_wins', 'merge'].includes(resolution_strategy)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid resolution strategy. Must be one of: client_wins, server_wins, merge',
-        status: 'error'
-      });
-    }
-    
-    // Get current server data
+
+    const allowed_strategies = [];
     const docRef = col.doc(supply_id);
     const doc = await docRef.get();
-    
+
+    let resolvedData;
+    let isNewSupply = false;
+
     if (!doc.exists) {
-      return res.status(404).json({
-        success: false,
-        message: 'Supply not found',
-        status: 'error'
-      });
+      isNewSupply = true;
+      allowed_strategies.push('client_wins');
+
+      if (resolution_strategy === 'server_wins' || resolution_strategy === 'update_data') {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot use ${resolution_strategy} strategy for new supply - no server data exists`,
+          status: 'error',
+          allowed_strategies,
+        });
+      }
+
+      resolvedData = { ...clientData };
+    } else {
+      allowed_strategies.push('client_wins', 'server_wins', 'merge', 'update_data', 'sum_quantities', 'average_quantities');
+      const serverData = doc.data();
+
+      if (!clientData) {
+        return res.status(400).json({
+          success: false,
+          message: 'Client data is required',
+          status: 'error',
+          allowed_strategies,
+        });
+      }
+
+      if (!allowed_strategies.includes(resolution_strategy)) {
+        return res.status(400).json({
+          success: false,
+          message: `Strategy "${resolution_strategy}" is not allowed for this conflict.`,
+          status: 'error',
+          allowed_strategies,
+        });
+      }
+
+      resolvedData = resolveSupplyConflict(clientData, serverData, resolution_strategy);
     }
-    
-    const serverData = doc.data();
-    
-    // Get client data from request
-    const clientData = req.body.clientData;
-    
-    if (!clientData) {
-      return res.status(400).json({
-        success: false,
-        message: 'Client data is required',
-        status: 'error'
-      });
+
+    if (isNewSupply) {
+      await createSupplyDoc(supply_id, resolvedData);
+    } else {
+      await updateSupplyDoc(supply_id, resolvedData);
     }
-    
-    // Apply requested resolution strategy
-    const resolvedData = resolveSupplyConflict(clientData, serverData, resolution_strategy);
-    
-    // Update with resolved data
-    await updateSupplyDoc(supply_id, resolvedData);
-    
+
     return res.status(200).json({
       success: true,
-      message: `Conflict resolved using ${resolution_strategy} strategy`,
+      message: `Conflict resolved using ${resolution_strategy} strategy${isNewSupply ? ' (new supply created)' : ' (existing supply updated)'}`,
       status: 'resolved',
       supply_id,
-      resolvedData
+      resolvedData,
+      isNewSupply,
+      resolution_strategy,
+      allowed_strategies,
     });
   } catch (error) {
     console.error('Error resolving supply conflict:', error);
     return res.status(500).json({
       success: false,
       message: `Server error: ${error.message}`,
-      status: 'error'
+      status: 'error',
+      allowed_strategies: [],
     });
   }
 };

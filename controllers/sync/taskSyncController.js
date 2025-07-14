@@ -4,6 +4,76 @@ import admin from '../../config/firebaseAdmin.js';
 const db = admin.firestore();
 const col = db.collection('tasks');
 
+/**
+ * Checks if two task profiles are likely the same task based on matching data
+ * @param {Object} clientData - The client task data
+ * @param {Object} serverData - The server task data
+ * @returns {boolean} - True if tasks likely belong to same task
+ */
+function isSameTaskProfile(clientData, serverData) {
+  if (!clientData || !serverData) return false;
+  
+  // Define fields to compare for task identity matching
+  const criticalFields = ['title', 'location_id', 'created_by'];
+  const optionalFields = ['due_date', 'priority'];
+  
+  let matchCount = 0;
+  let totalFields = 0;
+  let matchDetails = {};
+  
+  // Check critical fields
+  for (const field of criticalFields) {
+    if (clientData[field] && serverData[field]) {
+      totalFields++;
+      
+      if (field === 'title') {
+        // Title comparison (case-insensitive, trimmed)
+        const clientTitle = clientData[field].toLowerCase().trim();
+        const serverTitle = serverData[field].toLowerCase().trim();
+        
+        const match = clientTitle === serverTitle || 
+                     clientTitle.includes(serverTitle) || 
+                     serverTitle.includes(clientTitle);
+        matchDetails[field] = match;
+        if (match) matchCount++;
+      } else {
+        // Exact match for location_id and created_by
+        const match = clientData[field] === serverData[field];
+        matchDetails[field] = match;
+        if (match) matchCount++;
+      }
+    }
+  }
+  
+  // Check optional fields for additional confirmation
+  for (const field of optionalFields) {
+    if (clientData[field] && serverData[field]) {
+      totalFields++;
+      const match = clientData[field] === serverData[field];
+      matchDetails[field] = match;
+      if (match) matchCount++;
+    }
+  }
+  
+  // Consider it the same task if:
+  // 1. Title matches AND at least one other field matches
+  // 2. OR if 80% or more of available fields match
+  const titleMatches = clientData.title && serverData.title && 
+                      clientData.title.toLowerCase().trim() === serverData.title.toLowerCase().trim();
+  const matchPercentage = totalFields > 0 ? (matchCount / totalFields) : 0;
+  
+  const isSameTask = (titleMatches && matchCount >= 2) || matchPercentage >= 0.8;
+  
+  // Log the decision for debugging
+  console.log(`🔍 Task identity comparison for "${clientData.title}":`);
+  console.log(`   - Match details:`, matchDetails);
+  console.log(`   - Score: ${matchCount}/${totalFields} (${Math.round(matchPercentage * 100)}%)`);
+  console.log(`   - Title matches: ${titleMatches}`);
+  console.log(`   - Decision: ${isSameTask ? 'SAME TASK' : 'DIFFERENT TASK'}`);
+  
+  return isSameTask;
+}
+
 export const syncTaskFromClient = async (req, res) => {
   const t = req.body;
 
@@ -21,12 +91,35 @@ export const syncTaskFromClient = async (req, res) => {
       const existingTitle = await titleQuery.get();
       
       if (!existingTitle.empty && existingTitle.docs[0].id !== t.task_id) {
-        return res.status(409).json({
-          error: 'Conflict: Task with this title already exists at the same location',
-          conflict_field: 'title',
-          conflict_type: 'unique_constraint',
-          latest_data: existingTitle.docs[0].data(),
-        });
+        // Check if this is likely the same task (smart conflict detection)
+        if (isSameTaskProfile(t, existingTitle.docs[0].data())) {
+          console.log(`🔄 Auto-resolving: Same task detected for title "${t.title}"`);
+          
+          // Auto-resolve by updating the existing task with new data
+          const mergedData = {
+            ...existingTitle.docs[0].data(),
+            ...t,
+            task_id: existingTitle.docs[0].id, // Keep server's task_id
+            updated_at: new Date().toISOString(),
+          };
+          
+          await updateTaskDoc(existingTitle.docs[0].id, mergedData);
+          
+          return res.status(200).json({ 
+            message: 'Task synced successfully (auto-resolved duplicate task)',
+            resolved_as: 'same_task_detected',
+            server_task_id: existingTitle.docs[0].id,
+          });
+        } else {
+          // Different task with same title/location - show conflict
+          return res.status(409).json({
+            error: 'Conflict: Task with this title already exists at the same location',
+            conflict_field: 'title',
+            conflict_type: 'unique_constraint',
+            latest_data: existingTitle.docs[0].data(),
+            allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          });
+        }
       }
     }
     
@@ -41,8 +134,9 @@ export const syncTaskFromClient = async (req, res) => {
       if (clientUpdated < serverUpdated) {
         return res.status(409).json({
           error: 'Conflict: Stale update',
-          conflict_field: 'task_id',
+          conflict_field: 'updated_at',
           latest_data: serverData,
+          allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
         });
       }
 
@@ -139,74 +233,92 @@ const calculateMostAdvancedStatus = (clientStatus, serverStatus) => {
 };
 
 /**
- * Handles explicit conflict resolution requests from client
+ * Handles explicit conflict resolution requests from client, with allowed_strategies and resolution_strategy echoed.
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
  */
 export const resolveTaskSyncConflict = async (req, res) => {
   try {
-    const { task_id, resolution_strategy } = req.body;
+    const { task_id, resolution_strategy, clientData } = req.body;
     
     if (!task_id) {
       return res.status(400).json({ 
         success: false, 
         message: 'Task ID is required',
-        status: 'error'
+        status: 'error',
+        allowed_strategies: [],
       });
     }
-    
-    if (!['client_wins', 'server_wins', 'merge'].includes(resolution_strategy)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid resolution strategy. Must be one of: client_wins, server_wins, merge',
-        status: 'error'
-      });
-    }
-    
-    // Get current server data
+
+    const allowed_strategies = [];
     const docRef = col.doc(task_id);
     const doc = await docRef.get();
-    
+
+    let resolvedData;
+    let isNewTask = false;
+
     if (!doc.exists) {
-      return res.status(404).json({
-        success: false,
-        message: 'Task not found',
-        status: 'error'
-      });
+      isNewTask = true;
+      allowed_strategies.push('client_wins');
+
+      if (resolution_strategy === 'server_wins' || resolution_strategy === 'update_data') {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot use ${resolution_strategy} strategy for new task - no server data exists`,
+          status: 'error',
+          allowed_strategies,
+        });
+      }
+
+      resolvedData = { ...clientData };
+    } else {
+      allowed_strategies.push('client_wins', 'server_wins', 'merge', 'update_data');
+      const serverData = doc.data();
+
+      if (!clientData) {
+        return res.status(400).json({
+          success: false,
+          message: 'Client data is required',
+          status: 'error',
+          allowed_strategies,
+        });
+      }
+
+      if (!allowed_strategies.includes(resolution_strategy)) {
+        return res.status(400).json({
+          success: false,
+          message: `Strategy "${resolution_strategy}" is not allowed for this conflict.`,
+          status: 'error',
+          allowed_strategies,
+        });
+      }
+
+      resolvedData = resolveTaskConflict(clientData, serverData, resolution_strategy);
     }
-    
-    const serverData = doc.data();
-    
-    // Get client data from request
-    const clientData = req.body.clientData;
-    
-    if (!clientData) {
-      return res.status(400).json({
-        success: false,
-        message: 'Client data is required',
-        status: 'error'
-      });
+
+    if (isNewTask) {
+      await createTaskDoc(task_id, resolvedData);
+    } else {
+      await updateTaskDoc(task_id, resolvedData);
     }
-    
-    // Apply requested resolution strategy
-    const resolvedData = resolveTaskConflict(clientData, serverData, resolution_strategy);
-    
-    // Update with resolved data
-    await updateTaskDoc(task_id, resolvedData);
-    
+
     return res.status(200).json({
       success: true,
-      message: `Conflict resolved using ${resolution_strategy} strategy`,
+      message: `Conflict resolved using ${resolution_strategy} strategy${isNewTask ? ' (new task created)' : ' (existing task updated)'}`,
       status: 'resolved',
       task_id,
-      resolvedData
+      resolvedData,
+      isNewTask,
+      resolution_strategy,
+      allowed_strategies,
     });
   } catch (error) {
     console.error('Error resolving task conflict:', error);
     return res.status(500).json({
       success: false,
       message: `Server error: ${error.message}`,
-      status: 'error'
+      status: 'error',
+      allowed_strategies: [],
     });
   }
 };
