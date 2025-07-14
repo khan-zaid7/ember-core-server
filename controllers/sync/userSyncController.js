@@ -163,6 +163,8 @@ export const syncUserFromClient = async (req, res) => {
           conflict_field: 'updated_at',
           latest_data: serverData,
           allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          client_id: user.user_id,
+          server_id: user.user_id, // Same ID for stale updates
         });
       }
 
@@ -182,6 +184,8 @@ export const syncUserFromClient = async (req, res) => {
               conflict_type: 'potential_duplicate_account',
               latest_data: emailCheck.data,
               allowed_strategies: ['client_wins', 'server_wins', 'merge'],
+              client_id: user.user_id,
+              server_id: emailCheck.id,
             });
           } else {
             // Different user with same email
@@ -216,6 +220,8 @@ export const syncUserFromClient = async (req, res) => {
               conflict_type: 'potential_duplicate_account',
               latest_data: phoneCheck.data,
               allowed_strategies: ['client_wins', 'server_wins', 'merge'],
+              client_id: user.user_id,
+              server_id: phoneCheck.id,
             });
           } else {
             // Different user with same phone
@@ -504,6 +510,8 @@ export const resolveUserSyncConflict = async (req, res) => {
       isNewUser,
       resolution_strategy,
       allowed_strategies,
+      client_id: user_id,
+      server_id: user_id, // For users, IDs should match after resolution
     });
   } catch (error) {
     console.error('Error resolving user conflict:', error);

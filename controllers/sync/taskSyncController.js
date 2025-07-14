@@ -137,6 +137,8 @@ export const syncTaskFromClient = async (req, res) => {
           conflict_field: 'updated_at',
           latest_data: serverData,
           allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          client_id: t.task_id,
+          server_id: t.task_id, // Same ID for stale updates
         });
       }
 
@@ -311,6 +313,8 @@ export const resolveTaskSyncConflict = async (req, res) => {
       isNewTask,
       resolution_strategy,
       allowed_strategies,
+      client_id: task_id,
+      server_id: task_id, // For tasks, IDs should match after resolution
     });
   } catch (error) {
     console.error('Error resolving task conflict:', error);

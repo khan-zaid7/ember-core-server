@@ -138,6 +138,8 @@ export const syncRegistrationFromClient = async (req, res) => {
   const r = req.body;
 
   if (!r.registration_id || !r.user_id || !r.person_name || !r.updated_at) {
+    console.log("some fields are missing")
+    console.log(req.body);
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
@@ -167,6 +169,8 @@ export const syncRegistrationFromClient = async (req, res) => {
           conflict_field: 'updated_at',
           latest_data: serverData,
           allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          client_id: r.registration_id,
+          server_id: r.registration_id, // Same ID for stale updates
         });
       }
 
@@ -193,6 +197,8 @@ export const syncRegistrationFromClient = async (req, res) => {
               conflict_type: 'potential_duplicate_registration',
               latest_data: identityCheck.data,
               allowed_strategies: ['client_wins', 'server_wins', 'merge'],
+              client_id: r.registration_id,
+              server_id: identityCheck.id,
             });
           } else {
             // Different person with same identity
@@ -492,6 +498,8 @@ export const resolveRegistrationSyncConflict = async (req, res) => {
       isNewRegistration,
       resolution_strategy,
       allowed_strategies,
+      client_id: registration_id,
+      server_id: registration_id, // For registrations, IDs should match after resolution
     });
   } catch (error) {
     console.error('Error resolving registration conflict:', error);

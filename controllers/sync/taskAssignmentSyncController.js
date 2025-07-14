@@ -136,6 +136,8 @@ export const syncTaskAssignmentFromClient = async (req, res) => {
           conflict_field: 'updated_at',
           latest_data: serverData,
           allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          client_id: a.assignment_id,
+          server_id: a.assignment_id, // Same ID for stale updates
         });
       }
 
@@ -305,6 +307,8 @@ export const resolveTaskAssignmentSyncConflict = async (req, res) => {
       isNewAssignment,
       resolution_strategy,
       allowed_strategies,
+      client_id: assignment_id,
+      server_id: assignment_id, // For assignments, IDs should match after resolution
     });
   } catch (error) {
     console.error('Error resolving task assignment conflict:', error);

@@ -181,6 +181,8 @@ export const syncSupplyFromClient = async (req, res) => {
           conflict_field: 'updated_at',
           latest_data: serverData,
           allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          client_id: s.supply_id,
+          server_id: s.supply_id, // Same ID for stale updates
         });
       }
 
@@ -357,6 +359,8 @@ export const resolveSupplySyncConflict = async (req, res) => {
       isNewSupply,
       resolution_strategy,
       allowed_strategies,
+      client_id: supply_id,
+      server_id: supply_id, // For supplies, IDs should match after resolution
     });
   } catch (error) {
     console.error('Error resolving supply conflict:', error);

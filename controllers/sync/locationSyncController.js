@@ -176,6 +176,8 @@ export const syncLocationFromClient = async (req, res) => {
           conflict_field: 'updated_at',
           latest_data: serverData,
           allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          client_id: l.location_id,
+          server_id: l.location_id, // Same ID for stale updates
         });
       }
 
@@ -195,6 +197,8 @@ export const syncLocationFromClient = async (req, res) => {
               conflict_type: 'potential_duplicate_location',
               latest_data: nameCheck.data,
               allowed_strategies: ['client_wins', 'server_wins', 'merge'],
+              client_id: l.location_id,
+              server_id: nameCheck.id,
             });
           } else {
             // Different location with same name
@@ -420,6 +424,8 @@ export const resolveLocationSyncConflict = async (req, res) => {
       isNewLocation,
       resolution_strategy,
       allowed_strategies,
+      client_id: location_id,
+      server_id: location_id, // For locations, IDs should match after resolution
     });
   } catch (error) {
     console.error('Error resolving location conflict:', error);
