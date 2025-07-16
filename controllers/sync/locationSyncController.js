@@ -55,92 +55,7 @@ async function checkLocationNameExists(name, currentLocationId = null) {
   };
 }
 
-/**
- * Checks if two locations are likely the same place based on matching data
- * @param {Object} clientData - The client location data
- * @param {Object} serverData - The server location data
- * @returns {boolean} - True if locations likely refer to same place
- */
-function isSameLocationPlace(clientData, serverData) {
-  // Define fields to compare for identity matching
-  const criticalFields = ['name', 'address'];
-  const optionalFields = ['type', 'latitude', 'longitude']; // Less critical but can help confirm
-  
-  let matchCount = 0;
-  let totalFields = 0;
-  let matchDetails = {};
-  
-  // Check critical fields
-  for (const field of criticalFields) {
-    if (clientData[field] && serverData[field]) {
-      totalFields++;
-      
-      if (field === 'name') {
-        // Name comparison (case-insensitive, handle minor variations)
-        const clientName = clientData[field].toLowerCase().trim();
-        const serverName = serverData[field].toLowerCase().trim();
-        
-        // Check exact match or significant overlap
-        const match = clientName === serverName || 
-                     clientName.includes(serverName) || 
-                     serverName.includes(clientName);
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      } else if (field === 'address') {
-        // Address comparison (case-insensitive, handle minor variations)
-        const clientAddress = clientData[field].toLowerCase().trim();
-        const serverAddress = serverData[field].toLowerCase().trim();
-        
-        // Check exact match or significant overlap
-        const match = clientAddress === serverAddress || 
-                     clientAddress.includes(serverAddress) || 
-                     serverAddress.includes(clientAddress);
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      }
-    }
-  }
-  
-  // Check optional fields for additional confirmation
-  for (const field of optionalFields) {
-    if (clientData[field] && serverData[field]) {
-      totalFields++;
-      
-      if (field === 'latitude' || field === 'longitude') {
-        // Coordinate comparison (within reasonable distance ~100m)
-        const match = Math.abs(clientData[field] - serverData[field]) <= 0.001;
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      } else {
-        // Type comparison
-        const match = clientData[field].toLowerCase() === serverData[field].toLowerCase();
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      }
-    }
-  }
-  
-  // Consider it the same location if:
-  // 1. Name matches AND (address matches OR coordinates are close)
-  // 2. OR if 80% or more of available fields match
-  const nameMatches = clientData.name && serverData.name && 
-                     clientData.name.toLowerCase().trim() === serverData.name.toLowerCase().trim();
-  const addressMatches = clientData.address && serverData.address &&
-                        clientData.address.toLowerCase().trim() === serverData.address.toLowerCase().trim();
-  const matchPercentage = totalFields > 0 ? (matchCount / totalFields) : 0;
-  
-  const isSamePlace = (nameMatches && (addressMatches || matchCount >= 2)) || matchPercentage >= 0.8;
-  
-  // Log the decision for debugging
-  console.log(`🔍 Location identity comparison for ${clientData.name}:`);
-  console.log(`   - Match details:`, matchDetails);
-  console.log(`   - Score: ${matchCount}/${totalFields} (${Math.round(matchPercentage * 100)}%)`);
-  console.log(`   - Name matches: ${nameMatches}`);
-  console.log(`   - Address matches: ${addressMatches}`);
-  console.log(`   - Decision: ${isSamePlace ? 'SAME LOCATION' : 'DIFFERENT LOCATION'}`);
-  
-  return isSamePlace;
-}
+
 
 // === Main Sync Logic, with allowed_strategies in all 409 responses ===
 export const syncLocationFromClient = async (req, res) => {
@@ -186,30 +101,14 @@ export const syncLocationFromClient = async (req, res) => {
         const nameCheck = await checkLocationNameExists(l.name, l.location_id);
         
         if (nameCheck) {
-          // Check if this is likely the same location (edge case: name correction)
-          if (isSameLocationPlace(l, nameCheck.data)) {
-            console.log(`🔄 Auto-resolving: Same location detected for name change ${l.name}`);
-            
-            // This might be a duplicate location merge situation
-            return res.status(409).json({
-              error: 'Conflict: Location name belongs to another location that appears to be the same place',
-              conflict_field: 'name',
-              conflict_type: 'potential_duplicate_location',
-              latest_data: nameCheck.data,
-              allowed_strategies: ['client_wins', 'server_wins', 'merge'],
-              client_id: l.location_id,
-              server_id: nameCheck.id,
-            });
-          } else {
-            // Different location with same name
-            return res.status(409).json({
-              error: 'Conflict: Location with this name already exists',
-              conflict_field: 'name',
-              conflict_type: 'unique_constraint',
-              latest_data: nameCheck.data,
-              allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
-            });
-          }
+          // Different location with same name
+          return res.status(409).json({
+            error: 'Conflict: Location with this name already exists',
+            conflict_field: 'name',
+            conflict_type: 'unique_constraint',
+            latest_data: nameCheck.data,
+            allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          });
         }
       }
 
@@ -219,36 +118,14 @@ export const syncLocationFromClient = async (req, res) => {
       // Create case - check for existing location name
       const nameCheck = await checkLocationNameExists(l.name);
       if (nameCheck) {
-        // Check if this is likely the same location on a different device/session
-        if (isSameLocationPlace(l, nameCheck.data)) {
-          console.log(`🔄 Auto-resolving: Same location detected for ${l.name}`);
-          
-          // Auto-resolve by updating the existing location with new data
-          // Use the server's location_id but update with client data
-          const mergedData = {
-            ...nameCheck.data,
-            ...l,
-            location_id: nameCheck.id, // Keep server's location_id
-            updated_at: new Date().toISOString(),
-          };
-          
-          await updateLocationDoc(nameCheck.id, mergedData);
-          
-          return res.status(200).json({ 
-            message: 'Location synced successfully (auto-resolved duplicate location)',
-            resolved_as: 'same_location_detected',
-            server_location_id: nameCheck.id,
-          });
-        } else {
-          // Different location with same name - show conflict
-          return res.status(409).json({
-            error: 'Conflict: Location with this name already exists',
-            conflict_field: 'name',
-            conflict_type: 'unique_constraint',
-            latest_data: nameCheck.data,
-            allowed_strategies: ['client_wins'],
-          });
-        }
+        // Different location with same name - show conflict
+        return res.status(409).json({
+          error: 'Conflict: Location with this name already exists',
+          conflict_field: 'name',
+          conflict_type: 'unique_constraint',
+          latest_data: nameCheck.data,
+          allowed_strategies: ['client_wins'],
+        });
       }
 
       // ✅ Safe to create new location

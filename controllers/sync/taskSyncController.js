@@ -4,76 +4,6 @@ import admin from '../../config/firebaseAdmin.js';
 const db = admin.firestore();
 const col = db.collection('tasks');
 
-/**
- * Checks if two task profiles are likely the same task based on matching data
- * @param {Object} clientData - The client task data
- * @param {Object} serverData - The server task data
- * @returns {boolean} - True if tasks likely belong to same task
- */
-function isSameTaskProfile(clientData, serverData) {
-  if (!clientData || !serverData) return false;
-  
-  // Define fields to compare for task identity matching
-  const criticalFields = ['title', 'location_id', 'created_by'];
-  const optionalFields = ['due_date', 'priority'];
-  
-  let matchCount = 0;
-  let totalFields = 0;
-  let matchDetails = {};
-  
-  // Check critical fields
-  for (const field of criticalFields) {
-    if (clientData[field] && serverData[field]) {
-      totalFields++;
-      
-      if (field === 'title') {
-        // Title comparison (case-insensitive, trimmed)
-        const clientTitle = clientData[field].toLowerCase().trim();
-        const serverTitle = serverData[field].toLowerCase().trim();
-        
-        const match = clientTitle === serverTitle || 
-                     clientTitle.includes(serverTitle) || 
-                     serverTitle.includes(clientTitle);
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      } else {
-        // Exact match for location_id and created_by
-        const match = clientData[field] === serverData[field];
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      }
-    }
-  }
-  
-  // Check optional fields for additional confirmation
-  for (const field of optionalFields) {
-    if (clientData[field] && serverData[field]) {
-      totalFields++;
-      const match = clientData[field] === serverData[field];
-      matchDetails[field] = match;
-      if (match) matchCount++;
-    }
-  }
-  
-  // Consider it the same task if:
-  // 1. Title matches AND at least one other field matches
-  // 2. OR if 80% or more of available fields match
-  const titleMatches = clientData.title && serverData.title && 
-                      clientData.title.toLowerCase().trim() === serverData.title.toLowerCase().trim();
-  const matchPercentage = totalFields > 0 ? (matchCount / totalFields) : 0;
-  
-  const isSameTask = (titleMatches && matchCount >= 2) || matchPercentage >= 0.8;
-  
-  // Log the decision for debugging
-  console.log(`🔍 Task identity comparison for "${clientData.title}":`);
-  console.log(`   - Match details:`, matchDetails);
-  console.log(`   - Score: ${matchCount}/${totalFields} (${Math.round(matchPercentage * 100)}%)`);
-  console.log(`   - Title matches: ${titleMatches}`);
-  console.log(`   - Decision: ${isSameTask ? 'SAME TASK' : 'DIFFERENT TASK'}`);
-  
-  return isSameTask;
-}
-
 export const syncTaskFromClient = async (req, res) => {
   const t = req.body;
 
@@ -91,35 +21,13 @@ export const syncTaskFromClient = async (req, res) => {
       const existingTitle = await titleQuery.get();
       
       if (!existingTitle.empty && existingTitle.docs[0].id !== t.task_id) {
-        // Check if this is likely the same task (smart conflict detection)
-        if (isSameTaskProfile(t, existingTitle.docs[0].data())) {
-          console.log(`🔄 Auto-resolving: Same task detected for title "${t.title}"`);
-          
-          // Auto-resolve by updating the existing task with new data
-          const mergedData = {
-            ...existingTitle.docs[0].data(),
-            ...t,
-            task_id: existingTitle.docs[0].id, // Keep server's task_id
-            updated_at: new Date().toISOString(),
-          };
-          
-          await updateTaskDoc(existingTitle.docs[0].id, mergedData);
-          
-          return res.status(200).json({ 
-            message: 'Task synced successfully (auto-resolved duplicate task)',
-            resolved_as: 'same_task_detected',
-            server_task_id: existingTitle.docs[0].id,
-          });
-        } else {
-          // Different task with same title/location - show conflict
-          return res.status(409).json({
-            error: 'Conflict: Task with this title already exists at the same location',
-            conflict_field: 'title',
-            conflict_type: 'unique_constraint',
-            latest_data: existingTitle.docs[0].data(),
-            allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
-          });
-        }
+        return res.status(409).json({
+          error: 'Conflict: Task with this title already exists at the same location',
+          conflict_field: 'title',
+          conflict_type: 'unique_constraint',
+          latest_data: existingTitle.docs[0].data(),
+          allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+        });
       }
     }
     

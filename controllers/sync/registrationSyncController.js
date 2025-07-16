@@ -56,82 +56,7 @@ async function checkPersonIdentityExists(personName, age, gender, currentRegistr
   };
 }
 
-/**
- * Checks if two registrations are likely for the same person based on matching data
- * @param {Object} clientData - The client registration data
- * @param {Object} serverData - The server registration data
- * @returns {boolean} - True if registrations likely belong to same person
- */
-function isSamePersonRegistration(clientData, serverData) {
-  // Define fields to compare for identity matching
-  const criticalFields = ['person_name', 'age', 'gender'];
-  const optionalFields = ['contact', 'location_id']; // Less critical but can help confirm
-  
-  let matchCount = 0;
-  let totalFields = 0;
-  let matchDetails = {};
-  
-  // Check critical fields
-  for (const field of criticalFields) {
-    if (clientData[field] !== undefined && serverData[field] !== undefined) {
-      totalFields++;
-      
-      if (field === 'person_name') {
-        // Name comparison (case-insensitive, handle minor variations)
-        const clientName = clientData[field].toLowerCase().trim();
-        const serverName = serverData[field].toLowerCase().trim();
-        
-        // Check exact match or significant overlap
-        const match = clientName === serverName || 
-                     clientName.includes(serverName) || 
-                     serverName.includes(clientName);
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      } else if (field === 'age') {
-        // Age should match exactly or be within 1 year (account for birthday)
-        const match = Math.abs(clientData[field] - serverData[field]) <= 1;
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      } else if (field === 'gender') {
-        // Gender should match exactly
-        const match = clientData[field].toLowerCase() === serverData[field].toLowerCase();
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      }
-    }
-  }
-  
-  // Check optional fields for additional confirmation
-  for (const field of optionalFields) {
-    if (clientData[field] && serverData[field]) {
-      totalFields++;
-      const match = clientData[field] === serverData[field];
-      matchDetails[field] = match;
-      if (match) matchCount++;
-    }
-  }
-  
-  // Consider it the same person if:
-  // 1. Name and gender match AND (age matches OR contact matches)
-  // 2. OR if 80% or more of available fields match
-  const nameMatches = clientData.person_name && serverData.person_name && 
-                     clientData.person_name.toLowerCase().trim() === serverData.person_name.toLowerCase().trim();
-  const genderMatches = clientData.gender && serverData.gender &&
-                       clientData.gender.toLowerCase() === serverData.gender.toLowerCase();
-  const matchPercentage = totalFields > 0 ? (matchCount / totalFields) : 0;
-  
-  const isSamePerson = (nameMatches && genderMatches && matchCount >= 2) || matchPercentage >= 0.8;
-  
-  // Log the decision for debugging
-  console.log(`🔍 Identity comparison for ${clientData.person_name}:`);
-  console.log(`   - Match details:`, matchDetails);
-  console.log(`   - Score: ${matchCount}/${totalFields} (${Math.round(matchPercentage * 100)}%)`);
-  console.log(`   - Name matches: ${nameMatches}`);
-  console.log(`   - Gender matches: ${genderMatches}`);
-  console.log(`   - Decision: ${isSamePerson ? 'SAME PERSON' : 'DIFFERENT PERSON'}`);
-  
-  return isSamePerson;
-}
+
 
 // === Main Sync Logic, with allowed_strategies in all 409 responses ===
 export const syncRegistrationFromClient = async (req, res) => {
@@ -186,30 +111,14 @@ export const syncRegistrationFromClient = async (req, res) => {
         );
         
         if (identityCheck) {
-          // Check if this is likely the same person (edge case: data correction)
-          if (isSamePersonRegistration(r, identityCheck.data)) {
-            console.log(`🔄 Auto-resolving: Same person detected for identity change ${r.person_name}`);
-            
-            // This might be a duplicate registration merge situation
-            return res.status(409).json({
-              error: 'Conflict: Person identity belongs to another registration that appears to be the same person',
-              conflict_field: 'person_identity',
-              conflict_type: 'potential_duplicate_registration',
-              latest_data: identityCheck.data,
-              allowed_strategies: ['client_wins', 'server_wins', 'merge'],
-              client_id: r.registration_id,
-              server_id: identityCheck.id,
-            });
-          } else {
-            // Different person with same identity
-            return res.status(409).json({
-              error: 'Conflict: Patient with the same name, age, and gender already exists',
-              conflict_field: 'person_identity',
-              conflict_type: 'unique_constraint',
-              latest_data: identityCheck.data,
-              allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
-            });
-          }
+          // Different person with same identity
+          return res.status(409).json({
+            error: 'Conflict: Patient with the same name, age, and gender already exists',
+            conflict_field: 'person_identity',
+            conflict_type: 'unique_constraint',
+            latest_data: identityCheck.data,
+            allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+          });
         }
       }
 
@@ -219,36 +128,14 @@ export const syncRegistrationFromClient = async (req, res) => {
       // Create case - check for existing person
       const identityCheck = await checkPersonIdentityExists(r.person_name, r.age, r.gender);
       if (identityCheck) {
-        // Check if this is likely the same person on a different device/session
-        if (isSamePersonRegistration(r, identityCheck.data)) {
-          console.log(`🔄 Auto-resolving: Same person detected for registration ${r.person_name}`);
-          
-          // Auto-resolve by updating the existing registration with new data
-          // Use the server's registration_id but update with client data
-          const mergedData = {
-            ...identityCheck.data,
-            ...r,
-            registration_id: identityCheck.id, // Keep server's registration_id
-            updated_at: new Date().toISOString(),
-          };
-          
-          await updateRegistrationDoc(identityCheck.id, mergedData);
-          
-          return res.status(200).json({ 
-            message: 'Registration synced successfully (auto-resolved duplicate registration)',
-            resolved_as: 'same_person_detected',
-            server_registration_id: identityCheck.id,
-          });
-        } else {
-          // Different person with same identity - show conflict
-          return res.status(409).json({
-            error: 'Conflict: Patient with the same name, age, and gender already exists',
-            conflict_field: 'person_identity',
-            conflict_type: 'unique_constraint',
-            latest_data: identityCheck.data,
-            allowed_strategies: ['client_wins'],
-          });
-        }
+        // Different person with same identity - show conflict
+        return res.status(409).json({
+          error: 'Conflict: Patient with the same name, age, and gender already exists',
+          conflict_field: 'person_identity',
+          conflict_type: 'unique_constraint',
+          latest_data: identityCheck.data,
+          allowed_strategies: ['client_wins'],
+        });
       }
 
       // ✅ Safe to create new registration

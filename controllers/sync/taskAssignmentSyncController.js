@@ -4,77 +4,6 @@ import admin from '../../config/firebaseAdmin.js';
 const db = admin.firestore();
 const col = db.collection('task_assignments');
 
-/**
- * Checks if two task assignment profiles are likely the same assignment based on matching data
- * @param {Object} clientData - The client task assignment data
- * @param {Object} serverData - The server task assignment data
- * @returns {boolean} - True if assignments likely belong to same assignment
- */
-function isSameTaskAssignmentProfile(clientData, serverData) {
-  if (!clientData || !serverData) return false;
-  
-  // Define fields to compare for assignment identity matching
-  const criticalFields = ['task_id', 'user_id', 'assigned_by'];
-  const optionalFields = ['assigned_at', 'status'];
-  
-  let matchCount = 0;
-  let totalFields = 0;
-  let matchDetails = {};
-  
-  // Check critical fields
-  for (const field of criticalFields) {
-    if (clientData[field] && serverData[field]) {
-      totalFields++;
-      
-      // Exact match for all critical fields
-      const match = clientData[field] === serverData[field];
-      matchDetails[field] = match;
-      if (match) matchCount++;
-    }
-  }
-  
-  // Check optional fields for additional confirmation
-  for (const field of optionalFields) {
-    if (clientData[field] && serverData[field]) {
-      totalFields++;
-      
-      if (field === 'assigned_at') {
-        // Date comparison with some tolerance (within same day)
-        const clientDate = new Date(clientData[field]).toDateString();
-        const serverDate = new Date(serverData[field]).toDateString();
-        const match = clientDate === serverDate;
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      } else {
-        // Exact match for status
-        const match = clientData[field] === serverData[field];
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      }
-    }
-  }
-  
-  // Consider it the same assignment if:
-  // 1. Task ID and User ID match (most critical for assignments)
-  // 2. OR if 80% or more of available fields match
-  const coreMatch = clientData.task_id && serverData.task_id && 
-                   clientData.user_id && serverData.user_id &&
-                   clientData.task_id === serverData.task_id &&
-                   clientData.user_id === serverData.user_id;
-  const matchPercentage = totalFields > 0 ? (matchCount / totalFields) : 0;
-  
-  const isSameAssignment = coreMatch || matchPercentage >= 0.8;
-  
-  // Log the decision for debugging
-  console.log(`🔍 Assignment identity comparison for task ${clientData.task_id} -> user ${clientData.user_id}:`);
-  console.log(`   - Match details:`, matchDetails);
-  console.log(`   - Score: ${matchCount}/${totalFields} (${Math.round(matchPercentage * 100)}%)`);
-  console.log(`   - Core match (task+user): ${coreMatch}`);
-  console.log(`   - Decision: ${isSameAssignment ? 'SAME ASSIGNMENT' : 'DIFFERENT ASSIGNMENT'}`);
-  
-  return isSameAssignment;
-}
-
 export const syncTaskAssignmentFromClient = async (req, res) => {
   const a = req.body;
 
@@ -91,35 +20,13 @@ export const syncTaskAssignmentFromClient = async (req, res) => {
     const duplicateAssignments = await duplicateQuery.get();
     
     if (!duplicateAssignments.empty && duplicateAssignments.docs[0].id !== a.assignment_id) {
-      // Check if this is likely the same assignment (smart conflict detection)
-      if (isSameTaskAssignmentProfile(a, duplicateAssignments.docs[0].data())) {
-        console.log(`🔄 Auto-resolving: Same assignment detected for task ${a.task_id} -> user ${a.user_id}`);
-        
-        // Auto-resolve by updating the existing assignment with new data
-        const mergedData = {
-          ...duplicateAssignments.docs[0].data(),
-          ...a,
-          assignment_id: duplicateAssignments.docs[0].id, // Keep server's assignment_id
-          updated_at: new Date().toISOString(),
-        };
-        
-        await updateTaskAssignmentDoc(duplicateAssignments.docs[0].id, mergedData);
-        
-        return res.status(200).json({ 
-          message: 'Task Assignment synced successfully (auto-resolved duplicate assignment)',
-          resolved_as: 'same_assignment_detected',
-          server_assignment_id: duplicateAssignments.docs[0].id,
-        });
-      } else {
-        // Different assignment with same task/user - show conflict
-        return res.status(409).json({
-          error: 'Conflict: User is already assigned to this task',
-          conflict_field: 'task_id_user_id',
-          conflict_type: 'unique_constraint',
-          latest_data: duplicateAssignments.docs[0].data(),
-          allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
-        });
-      }
+      return res.status(409).json({
+        error: 'Conflict: User is already assigned to this task',
+        conflict_field: 'task_id_user_id',
+        conflict_type: 'unique_constraint',
+        latest_data: duplicateAssignments.docs[0].data(),
+        allowed_strategies: ['client_wins', 'server_wins', 'merge', 'update_data'],
+      });
     }
     
     const docRef = col.doc(a.assignment_id);

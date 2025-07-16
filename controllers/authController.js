@@ -80,22 +80,25 @@ export const registerUser = async (req, res) => {
 // 2. Login User
 export const loginUser = async (req, res) => {
   const { email, password } = req.body;
+  
+  // Normalize email to lowercase for consistency
+  const normalizedEmail = email?.trim().toLowerCase();
 
-  if (!email || !password || !isValidEmail(email) || password.length < 6) {
+  if (!normalizedEmail || !password || !isValidEmail(normalizedEmail) || password.length < 6) {
     return res.status(400).json({ error: 'Invalid email or password' });
   }
 
   try {
     const firebaseRes = await axios.post(
       `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
-      { email, password, returnSecureToken: true }
+      { email: normalizedEmail, password, returnSecureToken: true }
     );
 
     const { localId: uid } = firebaseRes.data;
     const user = await admin.auth().getUser(uid);
     const role = user.customClaims?.role || 'user';
 
-    const token = jwt.sign({ uid, email, role }, JWT_SECRET, { expiresIn: '2h' });
+    const token = jwt.sign({ uid, email: normalizedEmail, role }, JWT_SECRET, { expiresIn: '2h' });
 
     return res.status(200).json({
       message: 'Login successful',
@@ -111,25 +114,28 @@ export const loginUser = async (req, res) => {
 // 3. Forgot Password (Send OTP)
 export const forgotPassword = async (req, res) => {
   const { email } = req.body;
-
-  if (!email || !isValidEmail(email)) {
+  
+  // Normalize email to lowercase for consistency
+  const normalizedEmail = email?.trim().toLowerCase();
+  
+  if (!normalizedEmail || !isValidEmail(normalizedEmail)) {
     return res.status(400).json({ message: 'Valid email is required' });
   }
 
   try {
-    const querySnapshot = await usersCollection.where('email', '==', email).get();
+    const querySnapshot = await usersCollection.where('email', '==', normalizedEmail).get();
 
     if (querySnapshot.empty) {
       return res.status(404).json({ message: 'User not found with this email' });
     }
-
+    
     const otp = crypto.randomInt(100000, 999999);
     const expiresAt = admin.firestore.Timestamp.fromDate(
       new Date(Date.now() + OTP_EXPIRATION_MINUTES * 60 * 1000)
     );
 
-    await db.collection('otps').doc(email).set({
-      email,
+    await db.collection('otps').doc(normalizedEmail).set({
+      email: normalizedEmail,
       otp,
       expiresAt,
     });
@@ -144,13 +150,15 @@ export const forgotPassword = async (req, res) => {
 
     await transporter.sendMail({
       from: 'neehalhspam@gmail.com',
-      to: email,
+      to: normalizedEmail,
       subject: 'Password Reset OTP',
       text: `Your OTP for password reset is: ${otp}`,
     });
 
+    console.log('✅ OTP sent successfully to:', normalizedEmail);
     return res.status(200).json({ message: 'OTP sent successfully' });
   } catch (error) {
+    console.error('❌ Error in forgotPassword:', error);
     return res.status(500).json({ message: 'Failed to send OTP', error: error.message });
   }
 };
@@ -160,13 +168,16 @@ export const forgotPassword = async (req, res) => {
 // a. OTP Verification
 export const verifyOtp = async (req, res) => {
   const { email, otp } = req.body;
+  
+  // Normalize email to lowercase for consistency
+  const normalizedEmail = email?.trim().toLowerCase();
 
-  if (!email || !otp) {
+  if (!normalizedEmail || !otp) {
     return res.status(400).json({ message: 'Email and OTP are required' });
   }
 
   try {
-    const otpDoc = await db.collection('otps').doc(email).get();
+    const otpDoc = await db.collection('otps').doc(normalizedEmail).get();
 
     if (!otpDoc.exists) {
       return res.status(400).json({ message: 'No OTP found. Please request a new one.' });
@@ -191,17 +202,24 @@ export const verifyOtp = async (req, res) => {
 // b. Reset Password after OTP Verification
 export const resetPassword = async (req, res) => {
   const { email, password, confirm_password } = req.body;
+  
+  // Normalize email to lowercase for consistency
+  const normalizedEmail = email?.trim().toLowerCase();
 
-  if (!email || !password || !confirm_password) {
+  if (!normalizedEmail || !password || !confirm_password) {
     return res.status(400).json({ message: 'Email and new password are required' });
   }
 
-  if (password.length < 6 && confirm_password.length < 6) {
+  if (password.length < 6) {
     return res.status(400).json({ message: 'Password must be at least 6 characters long' });
   }
 
+  if (password !== confirm_password) {
+    return res.status(400).json({ message: 'Passwords do not match' });
+  }
+
   try {
-    const querySnapshot = await usersCollection.where('email', '==', email).get();
+    const querySnapshot = await usersCollection.where('email', '==', normalizedEmail).get();
 
     if (querySnapshot.empty) {
       return res.status(404).json({ message: 'User not found' });
@@ -210,16 +228,71 @@ export const resetPassword = async (req, res) => {
     const userDoc = querySnapshot.docs[0];
     const uid = userDoc.id;
 
-    await admin.auth().updateUser(uid, { password: password });
+    // Check if user exists in Firebase Auth and fix UID mismatch if needed
+    let actualUid = uid;
+    try {
+      await admin.auth().getUser(uid);
+    } catch (authError) {
+      if (authError.code === 'auth/user-not-found') {
+        // Try to find user by email in Firebase Auth
+        try {
+          const firebaseUserByEmail = await admin.auth().getUserByEmail(normalizedEmail);
+          actualUid = firebaseUserByEmail.uid;
+          
+          // Fix UID mismatch in Firestore
+          const userData = userDoc.data();
+          await usersCollection.doc(uid).delete();
+          await usersCollection.doc(actualUid).set({
+            ...userData,
+            updated_at: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          
+        } catch (emailError) {
+          if (emailError.code === 'auth/user-not-found') {
+            // Create new user in Firebase Auth
+            const userData = userDoc.data();
+            const newFirebaseUser = await admin.auth().createUser({
+              email: normalizedEmail,
+              password: password,
+              displayName: userData.name,
+            });
+            
+            actualUid = newFirebaseUser.uid;
+            
+            if (userData.role) {
+              await admin.auth().setCustomUserClaims(actualUid, { role: userData.role });
+            }
+            
+            // Update Firestore with new UID
+            await usersCollection.doc(uid).delete();
+            await usersCollection.doc(actualUid).set({
+              ...userData,
+              updated_at: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          } else {
+            throw emailError;
+          }
+        }
+      } else {
+        throw authError;
+      }
+    }
 
-    await usersCollection.doc(uid).update({
+    // Update password
+    await admin.auth().updateUser(actualUid, { password: password });
+
+    // Update Firestore document
+    await usersCollection.doc(actualUid).update({
       updated_at: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    await db.collection('otps').doc(email).delete();
+    // Clean up OTP
+    await db.collection('otps').doc(normalizedEmail).delete();
 
+    console.log('✅ Password reset completed for:', normalizedEmail);
     return res.status(200).json({ message: 'Password reset successfully' });
   } catch (err) {
+    console.error('❌ Error in resetPassword:', err);
     return res.status(500).json({ message: 'Error resetting password', error: err.message });
   }
 };
