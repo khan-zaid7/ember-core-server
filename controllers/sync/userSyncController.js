@@ -1,8 +1,12 @@
+
+// userController.js (or wherever your main sync logic is)
+
 import { createUserDoc, updateUserDoc } from '../../models/userModel.js';
 import admin from '../../config/firebaseAdmin.js';
 
 const db = admin.firestore();
 const usersCollection = db.collection('users');
+import bcrypt from 'bcryptjs'; 
 
 // === Input Validators ===
 function isValidEmail(email) {
@@ -43,86 +47,137 @@ async function checkUniqueFieldExists(field, value, currentUserId = null) {
 }
 
 /**
- * Checks if two user profiles are likely the same person based on matching data
- * @param {Object} clientData - The client user data
- * @param {Object} serverData - The server user data
- * @returns {boolean} - True if profiles likely belong to same person
+ * Checks if two user profiles are likely the same person based on matching data,
+ * *including a direct password comparison*, as explicitly requested for this project context.
+ *
+ * This function is used when a primary unique field (like email or phone_number) has
+ * already caused a potential conflict, and it's called to confirm if the profiles
+ * are from the same individual using *supporting* identifying data, including password.
+ *
+ * @param {Object} clientData - The user data from the client (e.g., a new local registration or update).
+ * @param {Object} serverData - An existing user's profile data from your database, conflicting on a unique field.
+ * This is assumed to contain a 'password' field that can be directly compared.
+ * @returns {boolean} - True if profiles likely belong to same person based on supporting fields, including password.
  */
-function isSameUserProfile(clientData, serverData) {
-  // Define fields to compare for identity matching
-  const criticalFields = ['name', 'email', 'phone_number'];
-  const optionalFields = ['role']; // Less critical but can help confirm
-  
+async function isSameUserProfile(clientData, serverData) { 
+  const supportingFields = ['name', 'role'];
+
   let matchCount = 0;
-  let totalFields = 0;
-  let matchDetails = {};
-  
-  // Check critical fields
-  for (const field of criticalFields) {
-    if (clientData[field] && serverData[field]) {
-      totalFields++;
-      
-      if (field === 'email') {
-        // Email should match exactly (case-insensitive)
-        const match = clientData[field].toLowerCase() === serverData[field].toLowerCase();
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      } else if (field === 'name') {
-        // Name comparison (case-insensitive, handle minor variations)
-        const clientName = clientData[field].toLowerCase().trim();
-        const serverName = serverData[field].toLowerCase().trim();
-        
-        // Check exact match or significant overlap
-        const match = clientName === serverName || 
-                     clientName.includes(serverName) || 
-                     serverName.includes(clientName);
-        matchDetails[field] = match;
-        if (match) matchCount++;
-      } else if (field === 'phone_number') {
-        // Phone number comparison (normalize format)
-        const clientPhone = clientData[field].replace(/\D/g, '');
-        const serverPhone = serverData[field].replace(/\D/g, '');
-        
-        // Check if numbers match (last 10 digits for international variations)
-        const match = clientPhone.slice(-10) === serverPhone.slice(-10);
-        matchDetails[field] = match;
-        if (match) matchCount++;
+  let totalFieldsToConsider = 0; // Counts fields with meaningful data on both sides
+  const matchDetails = {};
+
+  // --- 1. Strongest Check: User ID (Firebase UID) ---
+  // If user_id is present on both sides and they match, it's the most definitive sign.
+  if (clientData.user_id && serverData.user_id) {
+    totalFieldsToConsider++;
+    const userIdMatch = clientData.user_id === serverData.user_id;
+    matchDetails.user_id = userIdMatch;
+    if (userIdMatch) {
+      matchCount++;
+      console.log(`🔍 Identity comparison: Primary UID Match Found! (${clientData.user_id})`);
+      return true; // Immediate strong match
+    }
+  } else {
+    matchDetails.user_id = 'skipped (client UID not present or server UID missing)';
+  }
+
+  // --- 2. Very Strong Supporting Check: Password (SECURE COMPARISON with bcrypt) ---
+  // This now securely compares the plaintext client password against the hashed server password.
+  if (clientData.password && serverData.password) {
+    totalFieldsToConsider++;
+    try {
+      console.log(clientData.password);
+      console.log(serverData.password);
+      // Use bcrypt.compare to check the plaintext password against the hash
+      const passwordMatch = await bcrypt.compare(clientData.password, serverData.password); // <<< AWAITING BCRYPT.COMPARE
+      matchDetails.password = passwordMatch;
+      if (passwordMatch) {
+        matchCount++;
+        console.log(`🔑 Identity comparison: Password Match Found securely!`);
       }
+    } catch (error) {
+      console.error("Error during bcrypt password comparison:", error);
+      matchDetails.password = false; // Treat any error during comparison as a non-match
     }
+  } else {
+    matchDetails.password = 'skipped (missing password data for comparison or server hash)';
   }
-  
-  // Check optional fields for additional confirmation
-  for (const field of optionalFields) {
-    if (clientData[field] && serverData[field]) {
-      totalFields++;
-      const match = clientData[field] === serverData[field];
+
+  // --- 3. Other Supporting Checks: Name, Role ---
+  for (const field of supportingFields) {
+    const clientValue = clientData[field];
+    const serverValue = serverData[field];
+
+    if (clientValue !== undefined && clientValue !== null && clientValue !== '' &&
+        serverValue !== undefined && serverValue !== null && serverValue !== '') {
+      
+      totalFieldsToConsider++;
+
+      let match = false;
+      switch (field) {
+        case 'name':
+          const clientName = String(clientValue).toLowerCase().trim();
+          const serverName = String(serverValue).toLowerCase().trim();
+          match = clientName === serverName || 
+                  clientName.includes(serverName) || 
+                  serverName.includes(clientName);
+          break;
+        case 'role':
+          match = clientValue === serverValue;
+          break;
+        default:
+          match = clientValue === serverValue;
+          break;
+      }
       matchDetails[field] = match;
-      if (match) matchCount++;
+      if (match) {
+        matchCount++;
+      }
+    } else {
+      matchDetails[field] = `skipped (missing ${field} data)`;
     }
   }
-  
-  // Consider it the same user if:
-  // 1. Email matches AND at least one other field matches
-  // 2. OR if 80% or more of available fields match
-  const emailMatches = clientData.email && serverData.email && 
-                      clientData.email.toLowerCase() === serverData.email.toLowerCase();
-  const matchPercentage = totalFields > 0 ? (matchCount / totalFields) : 0;
-  
-  const isSameUser = (emailMatches && matchCount >= 2) || matchPercentage >= 0.8;
-  
-  // Log the decision for debugging
-  console.log(`🔍 Identity comparison for ${clientData.email}:`);
-  console.log(`   - Match details:`, matchDetails);
-  console.log(`   - Score: ${matchCount}/${totalFields} (${Math.round(matchPercentage * 100)}%)`);
-  console.log(`   - Email matches: ${emailMatches}`);
-  console.log(`   - Decision: ${isSameUser ? 'SAME USER' : 'DIFFERENT USER'}`);
-  
-  return isSameUser;
+
+  // --- Final Decision Logic ---
+  let isSameUserDecision = false;
+
+  const supportingMatchPercentage = totalFieldsToConsider > 0 ? (matchCount / totalFieldsToConsider) : 0;
+
+  // Decision criteria:
+  // If UID matched, it's true (handled by early return).
+  // Otherwise, if password matched, it's a very strong indicator.
+  // OR, if enough other fields align.
+  if (matchDetails.password === true) {
+      isSameUserDecision = true; 
+  } else if (matchCount >= 1 && supportingMatchPercentage >= 0.6) {
+      isSameUserDecision = true;
+  } else if (totalFieldsToConsider > 0 && matchCount === 0) {
+      isSameUserDecision = false;
+      console.log("No supporting fields (including UID/password if present) matched.");
+  } else if (totalFieldsToConsider === 0) {
+      isSameUserDecision = false;
+      console.warn("No additional unique or supporting fields available to confirm identity beyond the primary conflict field.");
+  } else {
+      isSameUserDecision = false;
+  }
+
+  // --- Logging for Debugging ---
+  console.log(`🔍 Identity comparison (contextual for primary conflict, includes password):`);
+  console.log(`   - Client User (ID: ${clientData.user_id || 'N/A'}, Email: ${clientData.email || 'N/A'})`);
+  console.log(`   - Server User (ID: ${serverData.user_id || 'N/A'}, Email: ${serverData.email || 'N/A'})`);
+  console.log(`   - Match details (UID + Password + Supporting Fields):`, matchDetails);
+  console.log(`   - Matched fields count: ${matchCount}/${totalFieldsToConsider}`);
+  console.log(`   - Match percentage: ${(totalFieldsToConsider > 0 ? (matchCount / totalFieldsToConsider) * 100 : 0).toFixed(1)}%`);
+  console.log(`   - Decision: ${isSameUserDecision ? 'SAME USER' : 'DIFFERENT USER'}`);
+
+  return isSameUserDecision;
 }
 
 // === Main Sync Logic, with allowed_strategies in all 409 responses ===
 export const syncUserFromClient = async (req, res) => {
-  const user = req.body;
+  const user = req.body; // 'user' object is directly req.body, so it includes 'password' if sent by client.
+
+  // Basic validation for required fields
   if (
     !user.user_id ||
     !user.name ||
@@ -130,18 +185,16 @@ export const syncUserFromClient = async (req, res) => {
     !user.role ||
     !user.updated_at
   ) {
-    console.log("reaching in if 1  ")
-
+    console.log("Reaching in if 1 (missing base required fields)");
     return res.status(400).json({ error: 'Missing required fields' });
   }
-  if (!isValidEmail(user.email)) {
-    console.log("reaching in if 2  ")
 
+  if (!isValidEmail(user.email)) {
+    console.log("Reaching in if 2 (invalid email format)");
     return res.status(400).json({ error: 'Invalid email format' });
   }
   if (user.phone_number && !isValidPhoneNumber(user.phone_number)) {
-    console.log("reaching in if 3  ")
-
+    console.log("Reaching in if 3 (invalid phone number format)");
     return res.status(400).json({ error: 'Invalid phone number format' });
   }
 
@@ -150,12 +203,13 @@ export const syncUserFromClient = async (req, res) => {
     const doc = await docRef.get();
 
     if (doc.exists) {
+      // User exists in server database, potential update
       const serverData = doc.data();
       const serverUpdated = new Date(serverData.updated_at);
       const clientUpdated = new Date(user.updated_at);
       
-      console.log("server Updated at:", serverUpdated);
-      console.log("client udpated at:", clientUpdated);
+      console.log("Server Updated at:", serverUpdated);
+      console.log("Client updated at:", clientUpdated);
 
       if (clientUpdated < serverUpdated) {
         return res.status(409).json({
@@ -168,29 +222,26 @@ export const syncUserFromClient = async (req, res) => {
         });
       }
 
-      // Unique constraint checks
+      // Unique constraint checks for email (if changed)
       if (user.email !== serverData.email) {
         const emailCheck = await checkUniqueFieldExists('email', user.email, user.user_id);
         if (emailCheck) {
-          // Check if this is likely the same user (edge case: user changed devices and email)
-          if (isSameUserProfile(user, emailCheck.data)) {
+          if (await isSameUserProfile(user, emailCheck.data)) {
             console.log(`🔄 Auto-resolving: Same user detected for email change ${user.email}`);
             
-            // This is tricky - the user might be trying to merge two accounts
-            // For now, we'll show a conflict but with merge options
             return res.status(409).json({
               error: 'Conflict: Email belongs to another account that appears to be yours',
               conflict_field: 'email',
               conflict_type: 'potential_duplicate_account',
               latest_data: emailCheck.data,
-              allowed_strategies: ['client_wins', 'server_wins', 'merge'],
-              client_id: user.user_id,
-              server_id: emailCheck.id,
+              allowed_strategies: ['client_wins', 'server_wins', 'merge'], // Options for merging these two potential duplicates
+              client_id: user.user_id, // This is the ID of the profile currently being synced
+              server_id: emailCheck.id, // This is the ID of the *conflicting* profile found by email
             });
           } else {
-            // Different user with same email
+            // Different user with same email (hard conflict)
             return res.status(409).json({
-              error: 'Conflict: Email already exists',
+              error: 'Conflict: Email already exists for a different user',
               conflict_field: 'email',
               conflict_type: 'unique_constraint',
               latest_data: emailCheck.data,
@@ -199,21 +250,18 @@ export const syncUserFromClient = async (req, res) => {
           }
         }
       }
-      if (
-        user.phone_number &&
-        user.phone_number !== serverData.phone_number
-      ) {
+
+      // Unique constraint checks for phone_number (if changed)
+      if (user.phone_number && user.phone_number !== serverData.phone_number) {
         const phoneCheck = await checkUniqueFieldExists(
           'phone_number',
           user.phone_number,
           user.user_id
         );
         if (phoneCheck) {
-          // Check if this is likely the same user (edge case: user changed devices and phone)
-          if (isSameUserProfile(user, phoneCheck.data)) {
+          if (await isSameUserProfile(user, phoneCheck.data)) {
             console.log(`🔄 Auto-resolving: Same user detected for phone change ${user.phone_number}`);
             
-            // This might be an account merge situation
             return res.status(409).json({
               error: 'Conflict: Phone number belongs to another account that appears to be yours',
               conflict_field: 'phone_number',
@@ -226,7 +274,7 @@ export const syncUserFromClient = async (req, res) => {
           } else {
             // Different user with same phone
             return res.status(409).json({
-              error: 'Conflict: Phone number already exists',
+              error: 'Conflict: Phone number already exists for a different user',
               conflict_field: 'phone_number',
               conflict_type: 'unique_constraint',
               latest_data: phoneCheck.data,
@@ -236,71 +284,71 @@ export const syncUserFromClient = async (req, res) => {
         }
       }
 
-      // ✅ Safe to update
-      await updateUserDoc(user.user_id, user);
+      // If no conflicts or stale data, safe to update
+      await updateUserDoc(user.user_id, user); // User includes password if client sent it
+      console.log(`User ${user.user_id} updated.`);
+
     } else {
-      // Create case
+      // User does not exist in server database, potential new creation
+      // Check for email conflict on creation
       const emailCheck = await checkUniqueFieldExists('email', user.email);
       if (emailCheck) {
-        // Check if this is likely the same user on a different device
-        if (isSameUserProfile(user, emailCheck.data)) {
-          console.log(`🔄 Auto-resolving: Same user detected for email ${user.email}`);
+        if (await isSameUserProfile(user, emailCheck.data)) {
+          console.log(`🔄 Auto-resolving: Same user detected for email ${user.email} on new registration`);
           
-          // Auto-resolve by updating the existing user with new data
-          // Use the server's user_id but update with client data
+          // Auto-resolve by updating the existing user with new data from client.
+          // This merges the new client profile with the existing server profile,
+          // usually keeping the server's user_id and updating its fields.
           const mergedData = {
-            ...emailCheck.data,
-            ...user,
-            user_id: emailCheck.id, // Keep server's user_id
-            updated_at: new Date().toISOString(),
+            ...emailCheck.data, // Server's existing data as base
+            ...user,            // Overlay client's new data (this includes the password if sent by client)
+            user_id: emailCheck.id, // Explicitly keep server's user_id
+            updated_at: new Date().toISOString(), // Update timestamp
           };
           
-          await updateUserDoc(emailCheck.id, mergedData);
+          await updateUserDoc(emailCheck.id, mergedData); // Update the existing server doc
           
           return res.status(200).json({ 
-            message: 'User synced successfully (auto-resolved duplicate account)',
+            message: 'User synced successfully (auto-resolved duplicate account via email)',
             resolved_as: 'same_user_detected',
-            server_user_id: emailCheck.id,
+            server_user_id: emailCheck.id, // ID of the profile that was updated
           });
         } else {
-          // Different user with same email - show conflict
+          // Different user trying to register with an existing email
           return res.status(409).json({
-            error: 'Conflict: Email already exists',
+            error: 'Conflict: Email already exists for a different user',
             conflict_field: 'email',
             conflict_type: 'unique_constraint',
             latest_data: emailCheck.data,
-            allowed_strategies: ['client_wins'],
+            allowed_strategies: ['client_wins'], // Only client_wins might make sense here if you allow changing their email.
           });
         }
       }
-      const phoneCheck = await checkUniqueFieldExists(
-        'phone_number',
-        user.phone_number
-      );
+
+      // Check for phone number conflict on creation (if email didn't conflict)
+      const phoneCheck = await checkUniqueFieldExists('phone_number', user.phone_number);
       if (phoneCheck) {
-        // Check if this is likely the same user (phone conflicts are rarer)
-        if (isSameUserProfile(user, phoneCheck.data)) {
-          console.log(`🔄 Auto-resolving: Same user detected for phone ${user.phone_number}`);
+        if (await isSameUserProfile(user, phoneCheck.data)) {
+          console.log(`🔄 Auto-resolving: Same user detected for phone ${user.phone_number} on new registration`);
           
-          // Auto-resolve by updating the existing user with new data
           const mergedData = {
             ...phoneCheck.data,
-            ...user,
-            user_id: phoneCheck.id, // Keep server's user_id
+            ...user, // This includes the password if sent by client
+            user_id: phoneCheck.id,
             updated_at: new Date().toISOString(),
           };
           
           await updateUserDoc(phoneCheck.id, mergedData);
           
           return res.status(200).json({ 
-            message: 'User synced successfully (auto-resolved duplicate account)',
+            message: 'User synced successfully (auto-resolved duplicate account via phone)',
             resolved_as: 'same_user_detected',
             server_user_id: phoneCheck.id,
           });
         } else {
-          // Different user with same phone - show conflict
+          // Different user trying to register with an existing phone number
           return res.status(409).json({
-            error: 'Conflict: Phone number already exists',
+            error: 'Conflict: Phone number already exists for a different user',
             conflict_field: 'phone_number',
             conflict_type: 'unique_constraint',
             latest_data: phoneCheck.data,
@@ -308,14 +356,16 @@ export const syncUserFromClient = async (req, res) => {
           });
         }
       }
-      // ✅ Safe to create new user
-      await createUserDoc(user.user_id, user);
+
+      // If no unique field conflicts, safe to create new user
+      await createUserDoc(user.user_id, user); // User includes password if client sent it
+      console.log(`New user ${user.user_id} created.`);
     }
 
     return res.status(200).json({ message: 'User synced successfully' });
   } catch (err) {
     console.error('❌ User sync error:', err);
-    return res.status(500).json({ error: 'User sync failed' });
+    return res.status(500).json({ error: 'User sync failed', details: err.message });
   }
 };
 
@@ -334,10 +384,14 @@ export const resolveUserConflict = (
 
     case 'update_data':
       return {
-        ...clientData,
-        email: serverData.email,
-        phone_number: serverData.phone_number,
+        ...clientData, // Client's data is the base
+        email: serverData.email, // Override email with server's
+        phone_number: serverData.phone_number, // Override phone_number with server's
         updated_at: new Date().toISOString(),
+        // If clientData has password and serverData also has it, client's password is used
+        // as per the spread operator order (...clientData before explicit overrides).
+        // If you always want server's password to win in 'update_data', add:
+        // password: serverData.password,
       };
 
     case 'merge':
@@ -346,21 +400,24 @@ export const resolveUserConflict = (
         ? new Date(clientData.updated_at)
         : null;
       const serverUpdatedAt = serverData.updated_at
-        ? serverData.updated_at.toDate
+        ? serverData.updated_at.toDate // Handle Firebase Timestamps
           ? serverData.updated_at.toDate()
           : new Date(serverData.updated_at)
         : null;
 
-      const merged = { ...serverData };
+      const merged = { ...serverData }; // Start with server's data as base
       const allKeys = [
         ...new Set([
           ...Object.keys(serverData),
           ...Object.keys(clientData),
         ]),
       ];
-      const criticalFields = ['email', 'role'];
+      // ADD 'password' here to include it in the merge comparison if you want
+      // the client's password to take precedence if it's newer.
+      const criticalFields = ['email', 'role', 'password']; // <-- ADDED 'password'
 
       allKeys.forEach((key) => {
+        // For critical fields, apply client's value only if client's timestamp is newer AND values differ
         if (criticalFields.includes(key)) {
           if (
             clientUpdatedAt &&
@@ -372,6 +429,7 @@ export const resolveUserConflict = (
             merged[key] = clientData[key];
           }
         } else if (
+          // For non-critical fields, apply client's value if client has it AND client's timestamp is newer AND values differ
           clientData[key] !== undefined &&
           (clientUpdatedAt &&
             serverUpdatedAt &&
@@ -382,10 +440,13 @@ export const resolveUserConflict = (
           merged[key] = clientData[key];
         }
       });
+      
+      // Explicitly set updated_at based on newer timestamp
       merged.updated_at =
         clientUpdatedAt && serverUpdatedAt && clientUpdatedAt > serverUpdatedAt
           ? clientData.updated_at
           : serverData.updated_at;
+          
       return merged;
     }
   }
@@ -394,7 +455,7 @@ export const resolveUserConflict = (
 // === Conflict Resolution Handler with allowed_strategies in response ===
 export const resolveUserSyncConflict = async (req, res) => {
   try {
-    const { user_id, resolution_strategy, clientData } = req.body;
+    const { user_id, resolution_strategy, clientData } = req.body; // clientData should include password
 
     if (!user_id) {
       return res.status(400).json({
@@ -413,8 +474,9 @@ export const resolveUserSyncConflict = async (req, res) => {
     let isNewUser = false;
 
     if (!doc.exists) {
+      // Scenario: Client is trying to sync a user_id that doesn't exist on server (new user)
       isNewUser = true;
-      allowed_strategies.push('client_wins');
+      allowed_strategies.push('client_wins'); // For a new user, client_wins is often the only sensible strategy unless you merge into an existing profile via email/phone.
 
       if (resolution_strategy === 'server_wins' || resolution_strategy === 'update_data') {
         return res.status(400).json({
@@ -424,7 +486,9 @@ export const resolveUserSyncConflict = async (req, res) => {
           allowed_strategies,
         });
       }
-      // Validate unique constraints
+      
+      // Before creating, re-validate unique constraints for the *new* clientData.
+      // This is crucial to prevent creating a new user with an email/phone already taken by *another* existing user.
       const emailCheck = await checkUniqueFieldExists('email', clientData.email, user_id);
       if (emailCheck) {
         return res.status(409).json({
@@ -434,7 +498,7 @@ export const resolveUserSyncConflict = async (req, res) => {
           conflict_field: 'email',
           conflict_type: 'unique_constraint',
           latest_data: emailCheck.data,
-          allowed_strategies,
+          allowed_strategies: [], // No strategies to "resolve" this as it's a new user with a unique conflict
         });
       }
       const phoneCheck = await checkUniqueFieldExists('phone_number', clientData.phone_number, user_id);
@@ -446,15 +510,18 @@ export const resolveUserSyncConflict = async (req, res) => {
           conflict_field: 'phone_number',
           conflict_type: 'unique_constraint',
           latest_data: phoneCheck.data,
-          allowed_strategies,
+          allowed_strategies: [],
         });
       }
-      resolvedData = { ...clientData };
+      
+      resolvedData = { ...clientData }; // For a new user, clientData is the source
     } else {
+      // Scenario: User already exists on server, resolving an update conflict
       allowed_strategies.push('client_wins', 'server_wins', 'merge', 'update_data');
       const serverData = doc.data();
 
-      // For update_data, check constraints
+      // For 'update_data' strategy, you *must* re-check unique constraints
+      // because clientData might have changed email/phone to one already owned by someone else.
       if (resolution_strategy === 'update_data') {
         if (clientData.email !== serverData.email) {
           const emailCheck = await checkUniqueFieldExists('email', clientData.email, user_id);
@@ -495,6 +562,7 @@ export const resolveUserSyncConflict = async (req, res) => {
       resolvedData = resolveUserConflict(clientData, serverData, resolution_strategy);
     }
 
+    // Perform the actual create or update based on the resolved data
     if (isNewUser) {
       await createUserDoc(user_id, resolvedData);
     } else {
