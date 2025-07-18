@@ -7,6 +7,7 @@ import admin from '../../config/firebaseAdmin.js';
 const db = admin.firestore();
 const usersCollection = db.collection('users');
 import bcrypt from 'bcryptjs'; 
+import { toISOStringSafe } from '../../config/toISOString.js';
 
 // === Input Validators ===
 function isValidEmail(email) {
@@ -590,4 +591,44 @@ export const resolveUserSyncConflict = async (req, res) => {
       allowed_strategies: [],
     });
   }
+};
+
+/**
+ * @route GET /api/users/:userId
+ * @desc Get a user's profile data by their user_id.
+ * @access Private (You should implement authentication/authorization middleware before this route)
+ */
+export const getUserDataById = async (req, res) => {
+    const { userId } = req.params; // Get userId from URL parameters
+
+    try {
+        const userDoc = await usersCollection.doc(userId).get();
+
+        if (!userDoc.exists) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+
+        let userData = userDoc.data();
+
+        // --- EXCLUDE PASSWORD FIELD ---
+        if (userData.password) {
+            delete userData.password;
+        }
+
+        // Convert Firestore Timestamps for consistency (optional but recommended)
+        const formattedUserData = {
+            ...userData,
+            created_at: toISOStringSafe(userData.created_at),
+            updated_at: toISOStringSafe(userData.updated_at),
+        };
+
+        return res.status(200).json({
+            message: 'User data retrieved successfully',
+            user: formattedUserData
+        });
+
+    } catch (error) {
+        console.error('Error fetching user data:', error);
+        res.status(500).json({ message: 'Failed to retrieve user data.' });
+    }
 };

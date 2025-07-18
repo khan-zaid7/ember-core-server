@@ -7,6 +7,7 @@ import authRoutes from './routes/authRoutes.js';
 // app.js
 import protectedRoutes from './routes/protectedRoutes.js'; 
 import syncRoutes from './routes/syncRoutes.js';
+import downSyncRoutes from './routes/downSyncRoutes.js';
 
 dotenv.config();
 
@@ -22,6 +23,7 @@ app.use(morgan('dev'));
 app.use('/api', authRoutes);
 app.use('/api', protectedRoutes);
 app.use('/api/sync', syncRoutes);
+app.use('/api/down-sync', downSyncRoutes);
 
 // Root routeAdd commentMore actions
 app.get('/', (req, res) => {

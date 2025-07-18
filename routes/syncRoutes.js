@@ -41,4 +41,6 @@ router.post('/location/resolve-conflict', resolveLocationSyncConflict);
 router.post('/alert/resolve-conflict', resolveAlertSyncConflict);
 router.post('/notification/resolve-conflict', resolveNotificationSyncConflict);
 
+
+// down
 export default router;
