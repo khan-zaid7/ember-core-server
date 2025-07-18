@@ -12,6 +12,8 @@ export const createAlertDoc = async (id, data) => {
     priority: data.priority || 'normal',
     timestamp: data.timestamp || admin.firestore.FieldValue.serverTimestamp(),
     sent_via: data.sent_via || 'app',
+    created_at: data.created_at || admin.firestore.FieldValue.serverTimestamp(),
+    updated_at: data.updated_at || admin.firestore.FieldValue.serverTimestamp(),
   });
 };
 
@@ -24,5 +26,6 @@ export const updateAlertDoc = async (id, data) => {
     priority: data.priority || 'normal',
     timestamp: data.timestamp || admin.firestore.FieldValue.serverTimestamp(),
     sent_via: data.sent_via || 'app',
+    updated_at: data.updated_at || admin.firestore.FieldValue.serverTimestamp(),
   });
 };

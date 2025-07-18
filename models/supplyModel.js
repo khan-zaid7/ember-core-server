@@ -13,6 +13,10 @@ export const createSupplyDoc = async (id, data) => {
     timestamp: data.timestamp,
     synced: true,
     status: data.status || 'active',
+    barcode: data.barcode !== undefined ? data.barcode : null,
+    sku: data.sku !== undefined ? data.sku : null,
+    created_at: data.created_at || admin.firestore.FieldValue.serverTimestamp(),
+    updated_at: data.updated_at || admin.firestore.FieldValue.serverTimestamp(),
   });
 };
 
@@ -25,5 +29,8 @@ export const updateSupplyDoc = async (id, data) => {
     timestamp: data.timestamp || admin.firestore.FieldValue.serverTimestamp(),
     status: data.status || 'active',
     synced: true,
+    barcode: data.barcode !== undefined ? data.barcode : null,
+    sku: data.sku !== undefined ? data.sku : null,
+    updated_at: data.updated_at || admin.firestore.FieldValue.serverTimestamp(),
   });
 };

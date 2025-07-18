@@ -15,6 +15,8 @@ export const createRegistrationDoc = async (id, data) => {
     timestamp: data.timestamp || FieldValue.serverTimestamp(),
     synced: true,
     sync_status_message: 'Synced successfully',
+    created_at: data.created_at || FieldValue.serverTimestamp(),
+    updated_at: data.updated_at || FieldValue.serverTimestamp(),
   });
 };
 
@@ -27,5 +29,6 @@ export const updateRegistrationDoc = async (id, data) => {
     timestamp: data.timestamp || admin.firestore.FieldValue.serverTimestamp(),
     synced: true,
     sync_status_message: data.sync_status_message || 'Updated',
+    updated_at: data.updated_at || admin.firestore.FieldValue.serverTimestamp(),
   });
 };
